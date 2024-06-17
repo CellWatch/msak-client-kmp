@@ -4,7 +4,14 @@ import java.net.InetAddress
 import java.net.Socket
 import javax.net.SocketFactory
 
+/**
+ * A factory to create sockets that keep track of the number of bytes sent and received at the
+ * transport layer. Does not work reliably without Conscrypt.
+ */
 class CountableSocketFactory: SocketFactory() {
+    /**
+     * The sockets that have been created by this factory.
+     */
     val sockets = ArrayList<CountableSocket>()
 
     override fun createSocket(): Socket {

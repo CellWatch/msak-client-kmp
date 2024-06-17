@@ -29,6 +29,23 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 import kotlin.random.Random
 
+/**
+ * A single TCP stream used to measure throughput.
+ *
+ * @param num The number of the stream within the throughput test.
+ * @param url The URL used to initiate the stream.
+ * @param direction The direction of the throughput test.
+ * @param minMessageSize The initial size of data messages sent during an upload test.
+ * @param maxMessageSize The maximum size of data messages sent during an upload test.
+ * @param minMessageSize The threshold for increasing the size of data messages sent during an
+ *                       upload test.
+ * @param queueFullDelayMillis How many milliseconds to wait before sending more data when the
+ *                             WebSocket's queue grows large during an upload test.
+ * @param avgMeasurementIntervalMillis The average time between measurement sampling.
+ * @param maxMeasurementIntervalMillis The maximum time between measurement sampling.
+ * @param minMeasurementIntervalMillis The minimum time between measurement sampling.
+ * @param userAgent The value of the User-Agent header to send when initiating the stream.
+ */
 class ThroughputStream(
     private val num: Int,
     private val url: String,
@@ -66,15 +83,56 @@ class ThroughputStream(
         minMeasurementIntervalMillis,
     )
 
+    /**
+     * A channel on which to receive updates as the throughput test progresses. Will be closed when
+     * the stream is complete.
+     */
     val updatesChan: ReceiveChannel<ThroughputUpdate> = _updatesChan
+
+    /**
+     * All updates received during on the stream so far.
+     */
     val updates: List<ThroughputUpdate> = _updates
+
+    /**
+     * The start time of the stream.
+     */
     var startTime: Instant? = null; private set
+
+    /**
+     * The end time of the stream. To wait for the stream to end, use updatesChan.
+     */
     var endTime: Instant? = null; private set
+
+    /**
+     * Whether the stream has been started.
+     */
     val started; get() = webSocket != null
+
+    /**
+     * Whether the stream has ended. To wait for the stream to end, use updatesChan.
+     */
     val ended; get() = endTime != null
+
+    /**
+     * The error that caused the throughput stream to end, if applicable. Will not be set until the
+     * stream is complete and updatesChan is closed.
+     */
     var error: Throwable? = null; private set
+
+    /**
+     * The number of application-layer bytes sent on the stream so far.
+     */
     val appBytesSent = AtomicLong(0)
+
+    /**
+     * The number of application-layer bytes received on the stream so far.
+     */
     val appBytesReceived = AtomicLong(0)
+
+    /**
+     * The number of transport-layer bytes sent on the stream so far.
+     */
     val netBytesSent: Long?
         get() {
             val startBytes = startNetBytesSent
@@ -86,6 +144,10 @@ class ThroughputStream(
 
             return endBytes - startBytes
         }
+
+    /**
+     * The number of transport-layer bytes received on the stream so far.
+     */
     val netBytesReceived: Long?
         get() {
             val startBytes = startNetBytesReceived
@@ -98,6 +160,9 @@ class ThroughputStream(
             return endBytes - startBytes
         }
 
+    /**
+     * Begin the throughput stream. Monitor its updates and wait for it to end with updatesChan.
+     */
     fun start() {
         startStopSem.acquire()
 
@@ -135,6 +200,10 @@ class ThroughputStream(
         }
     }
 
+    /**
+     * End the throughput stream. The stream will end on its own when it completes, but this method
+     * can be used to abort it early.
+     */
     fun stop() {
         startStopSem.acquire()
 
