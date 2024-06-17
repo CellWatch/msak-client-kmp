@@ -4,11 +4,33 @@ import edu.gatech.cc.cellwatch.msak.throughput.ThroughputDirection
 import io.ktor.http.URLBuilder
 import io.ktor.http.Url
 
+/**
+ * A measurement server returned by the Locate API.
+ *
+ * @param machine The server's name.
+ * @param location The geographic location of the server.
+ * @param urls A mapping of measurement service URL templates to the complete URL for the service on
+ *             the specified machine.
+ */
 open class Server(
     val machine: String,
     val location: ServerLocation?,
     val urls: Map<String, String>,
 ) {
+
+    /**
+     * Get the full URL used to initiate a throughput test to this server.
+     *
+     * @param direction The desired direction of the throughput test.
+     * @param streams The anticipated total number of concurrent TCP streams that will be used to
+     *                measure throughput.
+     * @param duration The anticipated duration of the throughput test in milliseconds.
+     * @param delay The anticipated delay in milliseconds between the initiation of each TCP stream.
+     * @param measurementId A unique identifier for the throughput measurement. This parameter is
+     *                      typically not needed if the Server was returned from a LocateManager.
+     *
+     * @return The full URL used to initiate a throughput test to this server.
+     */
     fun getThroughputUrl(
         direction: ThroughputDirection,
         streams: Int,
@@ -33,10 +55,22 @@ open class Server(
         return url.buildString()
     }
 
+    /**
+     * Get the full URL used to initiate a throughput test to this server.
+     *
+     * @param measurementId A unique identifier for the latency measurement. This parameter is
+     *                      typically not needed if the Server was returned from a LocateManager.
+     */
     fun getLatencyAuthorizeUrl(measurementId: String? = null): String {
         return getLatencyUrl(LATENCY_AUTHORIZE_PATH, measurementId)
     }
 
+    /**
+     * Get the full URL used to fetch the results of a latency measurement.
+     *
+     * @param measurementId The unique identifier of the latency measurement. This parameter should
+     *                      match the measurementId provided to getLatencyAuthorizeUrl.
+     */
     fun getLatencyResultUrl(measurementId: String? = null): String {
         return getLatencyUrl(LATENCY_RESULT_PATH, measurementId)
     }

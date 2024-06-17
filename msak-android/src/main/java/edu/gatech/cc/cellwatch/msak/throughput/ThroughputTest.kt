@@ -14,6 +14,19 @@ import kotlinx.datetime.Instant
 import java.util.concurrent.Semaphore
 import kotlin.concurrent.thread
 
+/**
+ * A multi-stream throughput test.
+ *
+ * @param server The Server against which to run the test, typically obtained via a LocateManager.
+ * @param direction The direction of the test.
+ * @param streams The number of TCP streams to use to measure throughput.
+ * @param duration The total anticipated duration of the test, in milliseconds.
+ * @param delay The anticipated delay, in milliseconds, between the start time of each stream.
+ * @param measurementId A unique ID for the measurement. Typically not needed if the server was
+ *                      obtained via a LocateManager.
+ * @param serverEndTimeGraceMillis The number of milliseconds beyond duration to wait for the test
+ *                                 to be ended by the server before ending it at the client.
+ */
 class ThroughputTest(
     server: Server,
     direction: ThroughputDirection,
@@ -29,14 +42,46 @@ class ThroughputTest(
     private val handler = Handler(Looper.getMainLooper())
     private val startStopSem = Semaphore(1)
 
+    /**
+     * The streams used in the test.
+     */
     val streams = List(streams) { ThroughputStream(it, url, direction) }
+
+    /**
+     * A channel on which to receive updates as the throughput test progresses. Will be closed when
+     * the test is complete.
+     */
     val updatesChan: ReceiveChannel<ThroughputUpdate> = _updatesChan
+
+    /**
+     * The start time of the test.
+     */
     var startTime: Instant? = null; private set
+
+    /**
+     * The end time of the test. To wait for the test to end, use updatesChan.
+     */
     var endTime: Instant? = null; private set
+
+    /**
+     * Whether the test has started.
+     */
     val started; get() = startTime != null
+
+    /**
+     * Whether the test has ended. To wait for the test to end, use updatesChan.
+     */
     val ended; get() = endTime != null
+
+    /**
+     * The hostname of the server against which the test runs. Note that this may differ from the
+     * machine value provided by the Server.
+     */
     val serverHost = Url(url).host
 
+    /**
+     * Begin the throughput test. Monitor its updates and wait for it to end with updatesChan.
+     */
     fun start() {
         startStopSem.acquire()
 
@@ -59,6 +104,10 @@ class ThroughputTest(
         }
     }
 
+    /**
+     * End the throughput test. The test will end on its own when complete, but this method can be
+     * used to abort it early.
+     */
     fun stop() {
         startStopSem.acquire()
 

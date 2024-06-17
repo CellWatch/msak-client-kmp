@@ -30,6 +30,25 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
 
+/**
+ * A latency test.
+ *
+ * @param server The Server against which to run the test, typically obtained via a LocateManager.
+ * @param client An optional OkHttpClient to use for the test. If not provided, a new one will be
+ *               created.
+ * @param measurementId A unique ID for the measurement. Typically not needed if the server was
+ *                      obtained via a LocateManager.
+ * @param latencyPort The port on which the measurement server is listening for the latency test's
+ *                    UDP packets.
+ * @param duration The duration in milliseconds for which the test will run. Should not be provided
+ *                 if using M-Lab's server infrastructure.
+ * @param retryDelay How long, in milliseconds, to wait for a response to the initial packet before
+ *                   resending it.
+ * @param retryBackoff How much longer, in milliseconds, to wait each time the initial packet must
+ *                     be resent.
+ * @param userAgent The value to use in the User-Agent header for HTTP requests to initiate the
+ *                  test and obtain the results.
+ */
 class LatencyTest(
     private val server: Server,
     client: OkHttpClient? = null,
@@ -49,16 +68,58 @@ class LatencyTest(
     private val socket = DatagramSocket()
     private val handler = Handler(Looper.getMainLooper())
 
+    /**
+     * A channel on which to receive updates as the latency test progresses. Will be closed when the
+     * test is complete.
+     */
     val updatesChan: ReceiveChannel<LatencyUpdate> = _updatesChan
+
+    /**
+     * All updates received during the test so far.
+     */
     val updates: List<LatencyUpdate> = _updates
+
+    /**
+     * The start time of the test.
+     */
     var startTime: Instant? = null; private set
+
+    /**
+     * The end time of the test. To wait for the test to end, use updatesChan.
+     */
     var endTime: Instant? = null; private set
+
+    /**
+     * Whether the test has been started.
+     */
     var started = false; private set
+
+    /**
+     * Whether the test has ended. To wait for the test to end, use updatesChan.
+     */
     val ended; get() = endTime != null
+
+    /**
+     * The hostname of the server against which the test runs. Note that this may differ from the
+     * machine value provided by the Server.
+     */
     val serverHost = Url(authorizeUrl).host
+
+    /**
+     * The result of the latency test. Will not be set until the test is complete and updatesChan is
+     * closed. May be null if error is not null.
+     */
     var result: LatencyResult? = null
+
+    /**
+     * The error that caused the latency test to end, if applicable. Will not be set until the test
+     * is complete and updatesChan is closed.
+     */
     var error: Throwable? = null
 
+    /**
+     * Begin the latency test. Monitor its updates and wait for it to end with updatesChan.
+     */
     fun start() {
         if (started) {
             throw Exception("already started")
@@ -78,6 +139,10 @@ class LatencyTest(
         }
     }
 
+    /**
+     * End the latency test. The test will end on its own when complete, but this method can be used
+     * to abort it early.
+     */
     fun stop() {
         if (!started) {
             throw Exception("can't stop before starting")

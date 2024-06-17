@@ -8,6 +8,7 @@ import edu.gatech.cc.cellwatch.msak.LOCATE_LATENCY_PATH
 import edu.gatech.cc.cellwatch.msak.LOCATE_THROUGHPUT_PATH
 import edu.gatech.cc.cellwatch.msak.Log
 import edu.gatech.cc.cellwatch.msak.Server
+import edu.gatech.cc.cellwatch.msak.ServerLocation
 import edu.gatech.cc.cellwatch.msak.THROUGHPUT_DOWNLOAD_PATH
 import edu.gatech.cc.cellwatch.msak.THROUGHPUT_UPLOAD_PATH
 import okhttp3.Call
@@ -21,6 +22,19 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
 
+/**
+ * Class to interface with M-Lab's Locate API.
+ *
+ * @param client An OkHttpClient to use for HTTP requests. If not provided, a new one will be
+ *               created.
+ * @param serverEnv The M-Lab environment to use.
+ * @param locateUrl A custom locate base URL to use rather than the default based on serverEnv.
+ * @param userAgent The value of the User-Agent header to use for HTTP requests.
+ * @param msakLocalServerHost The host portion of the URL to use when running MSAK locally. Only
+ *                            used if serverEnv is LOCAL.
+ * @param msakLocalServerSecure Whether the local MSAK server is using HTTPS or not. Only used if
+ *                              serverEnv is LOCAL.
+ */
 class LocateManager(
     client: OkHttpClient? = null,
     private val serverEnv: ServerEnv = ServerEnv.PROD,
@@ -35,7 +49,7 @@ class LocateManager(
         ServerEnv.PROD to "https://locate-dot-mlab-staging.appspot.com/v2/nearest/"
     )
     private val client = client ?: OkHttpClient.Builder().build()
-    var locateUrl: String = locateUrl ?: locateUrls[serverEnv] ?: ""
+    private val locateUrl: String = locateUrl ?: locateUrls[serverEnv] ?: ""
 
     init {
         if (serverEnv == ServerEnv.LOCAL && msakLocalServerHost == null) {
@@ -43,10 +57,23 @@ class LocateManager(
         }
     }
 
+    /**
+     * Request available MSAK throughput servers from the Locate API.
+     *
+     * @param server An optional server that, if provided, will be used to limit the results to only
+     *               servers at the same site.
+     */
     suspend fun locateThroughputServers(server: Server? = null): List<Server> {
         return locateServers("throughput", server)
     }
 
+
+    /**
+     * Request available MSAK latency servers from the Locate API.
+     *
+     * @param server An optional server that, if provided, will be used to limit the results to only
+     *               servers at the same site.
+     */
     suspend fun locateLatencyServers(server: Server? = null): List<Server> {
         return locateServers("latency", server)
     }
@@ -137,5 +164,8 @@ class LocateManager(
         })
     }
 
+    /**
+     * The M-Lab server environment.
+     */
     enum class ServerEnv {PROD, STAGING, LOCAL}
 }
