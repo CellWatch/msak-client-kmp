@@ -99,6 +99,25 @@ You may need to adjust the `msakLocalServerHost` depending on where your local M
 
 By default, msak-android uses `android.util.Log` to log. You can call `setLogger` to use a custom logger object instead.
 
+## Development setup
+
+msak-android is an Android Studio project. For local testing, it may be useful to publish to the configured local repository (`./gradlew publishAllPublicationsToLocalRepository`) and then set up your app to consume the library from that local repository:
+
+```
+// in settings.gradle (make sure you adjust the path)
+dependencyResolutionManagement {
+    repositories {
+        maven { url 'file:///path/to/msak-android/msak-android/build/repo' }
+        // ...
+    }
+}
+
+// in build.gradle (make sure you adjust the version)
+dependencies {
+    implementation 'edu.gatech.cc.cellwatch:msak:<version>'
+}
+```
+
 ## Credits
 
 msak-android was developed using [Roberto D'Auria's early MSAK implementation](https://github.com/robertodauria/msak/) as a reference. It also provides a basic re-implementation of [M-Lab's memoryless package](https://github.com/m-lab/go/tree/main/memoryless) in Kotlin.
