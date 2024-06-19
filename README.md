@@ -75,3 +75,27 @@ You may need to adjust the `msakLocalServerHost` depending on where your local M
 ### Custom logger
 
 By default, msak-android uses `android.util.Log` to log. You can call `setLogger` to use a custom logger object instead.
+
+## Credits
+
+msak-android was developed using [Roberto D'Auria's early MSAK implementation](https://github.com/robertodauria/msak/) as a reference. It also provides a basic re-implementation of [M-Lab's memoryless package](https://github.com/m-lab/go/tree/main/memoryless) in Kotlin.
+
+## License
+
+```
+Copyright 2024
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+See the `LICENSE` file for the full license text.
