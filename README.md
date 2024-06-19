@@ -12,6 +12,29 @@ Security.insertProviderAt(Conscrypt.newProvider(), 1)
 
 (The MSAK throughput tests also collect application-layer byte counts, which work regardless with or without Conscrypt.)
 
+## Setup
+
+You can get msak-android via [jitpack.io](https://jitpack.io)'s Maven repository. First add the repository to your `settings.gradle` file:
+
+```
+dependencyResolutionManagement {
+    repositories {
+        // ...
+        maven { url 'https://jitpack.io' }
+    }
+}
+```
+
+Then add msak-android to your dependencies in the app-level `build.gradle`, replacing `<tag>` with the desired version tag:
+
+```
+dependencies {
+    implementation 'com.github.CellWatch:msak-android:<tag>'
+}
+```
+
+For more instructions, see <https://jitpack.io/#CellWatch/msak-android>.
+
 ## Usage
 
 The Javadoc comments aim to document all public classes and methods. A few useful examples are included below.
