@@ -12,6 +12,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.datetime.Clock
 import kotlinx.datetime.Instant
 import java.util.concurrent.Semaphore
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 /**
@@ -42,6 +43,7 @@ class ThroughputTest(
     private val _updatesChan = Channel<ThroughputUpdate>(32)
     private val handler = Handler(Looper.getMainLooper())
     private val startStopSem = Semaphore(1)
+    private val unfinishedStreamCount = AtomicInteger(streams)
 
     /**
      * The streams used in the test.
@@ -151,6 +153,11 @@ class ThroughputTest(
                         if (!result.isSuccess) {
                             Log.d(TAG, "failed to send throughput update on channel: $result")
                         }
+                    }
+
+                    if (unfinishedStreamCount.addAndGet(-1) == 0) {
+                        Log.d(TAG, "all streams finished, finishing test")
+                        finish()
                     }
                 }
             } catch (e: Throwable) {
