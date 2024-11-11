@@ -62,7 +62,7 @@ afterEvaluate {
             register<MavenPublication>("release") {
                 groupId = "edu.gatech.cc.cellwatch"
                 artifactId = "msak"
-                version = "0.1.2"
+                version = "0.1.3"
 
                 afterEvaluate {
                     from(components["release"])
