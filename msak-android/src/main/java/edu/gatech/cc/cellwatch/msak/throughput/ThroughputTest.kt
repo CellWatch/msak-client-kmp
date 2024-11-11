@@ -35,6 +35,7 @@ class ThroughputTest(
     private val delay: Long = 0,
     measurementId: String? = null,
     private val serverEndTimeGraceMillis: Long = 5000,
+    userAgent: String? = null,
 ) {
     private val TAG = this::class.simpleName
     private val url = server.getThroughputUrl(direction, streams, duration, delay, measurementId)
@@ -45,7 +46,7 @@ class ThroughputTest(
     /**
      * The streams used in the test.
      */
-    val streams = List(streams) { ThroughputStream(it, url, direction) }
+    val streams = List(streams) { ThroughputStream(it, url, direction, userAgent = userAgent) }
 
     /**
      * A channel on which to receive updates as the throughput test progresses. Will be closed when
