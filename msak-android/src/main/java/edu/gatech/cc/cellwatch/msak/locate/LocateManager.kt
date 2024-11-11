@@ -18,6 +18,7 @@ import okhttp3.Request
 import okhttp3.Response
 import java.io.IOException
 import java.security.InvalidParameterException
+import java.util.UUID
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
@@ -98,19 +99,21 @@ class LocateManager(
                 throw RuntimeException("missing msak local server host for local env")
             }
 
+            val measurementId = UUID.randomUUID().toString()
+
             val urls = when (test) {
                 "throughput" -> {
                     val proto = "ws${if (msakLocalServerSecure) { "s" } else { "" }}"
                     mapOf(
-                        "$proto:///$THROUGHPUT_DOWNLOAD_PATH" to "$proto://$msakLocalServerHost/$THROUGHPUT_DOWNLOAD_PATH",
-                        "$proto:///$THROUGHPUT_UPLOAD_PATH" to "$proto://$msakLocalServerHost/$THROUGHPUT_UPLOAD_PATH",
+                        "$proto:///$THROUGHPUT_DOWNLOAD_PATH" to "$proto://$msakLocalServerHost/$THROUGHPUT_DOWNLOAD_PATH?mid=$measurementId",
+                        "$proto:///$THROUGHPUT_UPLOAD_PATH" to "$proto://$msakLocalServerHost/$THROUGHPUT_UPLOAD_PATH?mid=$measurementId",
                     )
                 }
                 "latency" -> {
                     val proto = "http${if (msakLocalServerSecure) { "s" } else { "" }}"
                     mapOf(
-                        "$proto:///$LATENCY_AUTHORIZE_PATH" to "$proto://$msakLocalServerHost/$LATENCY_AUTHORIZE_PATH",
-                        "$proto:///$LATENCY_RESULT_PATH" to "$proto://$msakLocalServerHost/$LATENCY_RESULT_PATH",
+                        "$proto:///$LATENCY_AUTHORIZE_PATH" to "$proto://$msakLocalServerHost/$LATENCY_AUTHORIZE_PATH?mid=$measurementId",
+                        "$proto:///$LATENCY_RESULT_PATH" to "$proto://$msakLocalServerHost/$LATENCY_RESULT_PATH?mid=$measurementId",
                     )
                 }
                 else -> throw InvalidParameterException("unknown test type $test")
