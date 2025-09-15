@@ -20,6 +20,9 @@ import kotlinx.coroutines.runBlocking
 import kotlin.math.pow
 import kotlin.math.roundToInt
 
+//import edu.gatech.cc.cellwatch.msak.shared.platform   // <-- from :msak-shared
+
+
 class MainActivity : AppCompatActivity() {
     private val TAG = this::class.simpleName
     private lateinit var binding: ActivityMainBinding
@@ -94,6 +97,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     suspend fun testLatency() {
+        //printMsg("Starting latency test via shared lib: ${platform()}")
         val duration = binding.latDuration.text.toString().toLong()
         val locateManager = getLocateManager()
 
