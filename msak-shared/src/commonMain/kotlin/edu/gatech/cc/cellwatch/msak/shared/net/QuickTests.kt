@@ -12,6 +12,8 @@ import edu.gatech.cc.cellwatch.msak.shared.Log
 
 import kotlinx.coroutines.channels.onFailure
 import kotlinx.coroutines.channels.onSuccess
+import edu.gatech.cc.cellwatch.msak.shared.THROUGHPUT_DOWNLOAD_PATH
+import edu.gatech.cc.cellwatch.msak.shared.THROUGHPUT_UPLOAD_PATH
 import edu.gatech.cc.cellwatch.msak.shared.Server
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -22,7 +24,26 @@ import kotlin.time.Duration.Companion.seconds
 
 
 
+import edu.gatech.cc.cellwatch.msak.shared.throughput.*
+import io.ktor.http.Url
+import kotlinx.coroutines.*
+import kotlinx.datetime.Clock
+import kotlin.math.max
+import kotlin.math.roundToLong
+
 object QuickTests {
+    // KMP-safe 2-decimal formatter (no java.util/DecimalFormat in commonMain)
+    private fun fmt2(x: Double): String {
+        if (x.isNaN()) return "NaN"
+        if (x.isInfinite()) return if (x > 0) "+∞" else "-∞"
+        val scaled = (x * 100.0).roundToLong()
+        var intPart: Long = scaled / 100
+        var frac: Long = kotlin.math.abs(scaled % 100)
+        // Avoid "-0" for tiny negative values rounded to 0
+        if (intPart == 0L && x < 0 && frac == 0L) intPart = 0
+        val fracStr = if (frac < 10L) "0$frac" else "$frac"
+        return "$intPart.$fracStr"
+    }
     /** Open a UDP socket, call connect(host, port), briefly hold, then close.
      *  Returns true if no exception was thrown. */
     suspend fun udpOpenClose(host: String, port: Int, holdMs: Long = 500L): Boolean {
@@ -228,7 +249,20 @@ object QuickTests {
             val res: LatencyResult = test.result ?: return "error: no result"
             val received = res.PacketsReceived
             val sent = res.PacketsSent
-            "OK $received/$sent"
+            val rttsUs = res.RoundTrips.mapNotNull { it.rttUs }
+            if (rttsUs.isEmpty()) return "OK $received/$sent (no samples)"
+            val n = rttsUs.size
+            val meanUs = rttsUs.sum().toDouble() / n
+            var variance = 0.0
+            for (v in rttsUs) {
+                val d = v - meanUs
+                variance += d * d
+            }
+            variance /= n
+            val stdevUs = kotlin.math.sqrt(variance)
+            val meanMs = meanUs / 1000.0
+            val stdevMs = stdevUs / 1000.0
+            "OK $received/$sent mean=${fmt2(meanMs)}ms stdev=${fmt2(stdevMs)}ms"
         } catch (t: Throwable) {
             // FINAL guard so nothing escapes across the Swift bridge.
             "error: ${t.message ?: t::class.simpleName ?: "unknown"}"
@@ -241,6 +275,134 @@ object QuickTests {
             "OK"
         } catch (t: Throwable) {
             "error: ${t.message ?: t::class.simpleName ?: "unknown"}"
+        }
+    }
+
+
+    /**
+     * Run a short multi-stream throughput test over WebSocket against a single host:port.
+     *
+     * This is a smoke test for the KMP pipeline, not a full UX flow. It:
+     *  1) builds a minimal Server URL map for ws:///throughput/v1/{download|upload}
+     *  2) runs ThroughputTest
+     *  3) aggregates Application-layer bytes from all streams
+     *  4) returns a compact summary string
+     *
+     * The function is Swift-friendly: it manages its own scope and calls [completion] instead of using suspend.
+     */
+    fun throughputSmokeTest(
+        host: String,
+        wsPort: Int,
+        directionStr: String = "download",   // "download" or "upload"
+        streams: Int = 2,
+        durationMs: Long = 5_000,
+        delayMs: Long = 0,
+        userAgent: String? = null,
+        completion: (String?, Throwable?) -> Unit
+    ) {
+        val dir = when (directionStr.lowercase()) {
+            "download", "down", "dl" -> ThroughputDirection.DOWNLOAD
+            "upload", "up", "ul" -> ThroughputDirection.UPLOAD
+            else -> ThroughputDirection.DOWNLOAD
+        }
+
+        // Build the minimal URL map that Server expects.
+        // Server.getThroughputUrl looks for "ws:///throughput/v1/download" and ".../upload".
+        val wsBase = "ws://$host:$wsPort"
+        val urls = mapOf(
+            "ws:///$THROUGHPUT_DOWNLOAD_PATH" to "$wsBase/$THROUGHPUT_DOWNLOAD_PATH",
+            "ws:///$THROUGHPUT_UPLOAD_PATH"   to "$wsBase/$THROUGHPUT_UPLOAD_PATH",
+        )
+        val server = Server(machine = host, location = null, urls = urls)
+
+        // Internal scope; independent of callers.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+        scope.launch {
+            Log.d("ThroughputTest", "starting smoke test: dir=${dir} streams=${streams} durationMs=${durationMs} wsBase=$wsBase")
+            try {
+                val test = ThroughputTest(
+                    server = server,
+                    direction = dir,
+                    numStreams = streams,
+                    duration = durationMs,
+                    delay = delayMs,
+                    measurementId = "localtest", // harmless for local testing; omit for production locate flow
+                    userAgent = userAgent
+                )
+
+                var appBytesTotal: Long = 0
+                var firstTs = Clock.System.now()
+                var lastTs = firstTs
+                var updates = 0
+
+                // Start and collect until the test closes its channel.
+                test.start()
+                // Aggregate application-layer bytes using per-stream deltas, and keep
+                // separate tallies for client- vs server-originated measurements so
+                // we can diagnose “all zeros” situations.
+                val lastClient = LongArray(streams) { 0L }
+                val lastServer = LongArray(streams) { 0L }
+                var clientUpdates = 0
+                var serverUpdates = 0
+                var clientBytes = 0L
+                var serverBytes = 0L
+
+                for (u in test.updatesChan) {
+                    val app = u.measurement.Application
+                    val s = u.stream.coerceIn(0, streams - 1)
+
+                    if (u.fromServer) {
+                        // Server-originated cumulative counter to use
+                        val cum = when (dir) {
+                            ThroughputDirection.DOWNLOAD -> app.BytesSent      // server sent to us
+                            ThroughputDirection.UPLOAD   -> app.BytesReceived   // server received from us
+                        }
+                        val delta = (cum - lastServer[s]).coerceAtLeast(0)
+                        lastServer[s] = cum
+                        serverBytes += delta
+                        appBytesTotal += delta
+                        serverUpdates++
+                    } else {
+                        // Client-originated cumulative counter to use
+                        val cum = when (dir) {
+                            ThroughputDirection.DOWNLOAD -> app.BytesReceived   // we received
+                            ThroughputDirection.UPLOAD   -> app.BytesSent       // we sent
+                        }
+                        val delta = (cum - lastClient[s]).coerceAtLeast(0)
+                        lastClient[s] = cum
+                        clientBytes += delta
+                        appBytesTotal += delta
+                        clientUpdates++
+                    }
+
+                    // Track time bounds for a rough bitrate
+                    if (updates == 0) firstTs = u.time
+                    lastTs = u.time
+                    updates++
+                }
+
+                // Small diagnostics string appended to summary for visibility.
+                val diagSummary = "client=${clientUpdates}/${fmt2(clientBytes / 1_000_000.0)}M " +
+                                  "server=${serverUpdates}/${fmt2(serverBytes / 1_000_000.0)}M"
+
+                // Compute Mbps based on observed elapsed. Guard against very small intervals.
+                val elapsedMs = max(1, lastTs.toEpochMilliseconds() - firstTs.toEpochMilliseconds())
+                val mbits = (appBytesTotal * 8.0) / 1_000_000.0
+                val mbps = mbits / (elapsedMs / 1000.0)
+
+                val summary =
+                    "Throughput $directionStr OK | streams=$streams dur=${durationMs}ms " +
+                    "bytes=$appBytesTotal app Mbits=${fmt2(mbits)} " +
+                    "Mbps=${fmt2(mbps)} updates=$updates [$diagSummary]"
+
+                completion(summary, null)
+            } catch (t: Throwable) {
+                completion(null, t)
+            } finally {
+                // Ensure we do not leak this helper scope.
+                scope.cancel()
+            }
         }
     }
 }

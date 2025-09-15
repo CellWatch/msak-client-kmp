@@ -5,6 +5,7 @@ plugins {
     alias(libs.plugins.jetbrains.kotlin.multiplatform)
     alias(libs.plugins.android.kotlin.multiplatform.library)
     alias(libs.plugins.jetbrains.kotlin.serialization)
+    alias(libs.plugins.kotlinx.atomicfu.plugin)
 }
 
 kotlin {
@@ -64,8 +65,7 @@ kotlin {
                 implementation(libs.kotlinx.serialization.json)
                 implementation(libs.kotlinx.datetime)
                 implementation(libs.ktor.client.logging)
-
-
+                implementation(libs.kotlinx.atomicfu)
             }
         }
 

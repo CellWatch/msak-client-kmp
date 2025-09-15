@@ -15,7 +15,8 @@ struct ContentView: View {
     @State private var statusLatency: String = "Latency: idle"
     @State private var statusLatencyFull: String = "LatencyFull: idle"
     @State private var statusLogger: String = "Logger: idle"
-
+    @State private var statusTP: String = "Throughput: idle"
+    
     // IMPORTANT: Avoid heavy or complex work inside `body`. Doing so can confuse the SwiftUI
     // ViewBuilder type-checker and trigger the vague error "Generic parameter 'V' could not be inferred".
     // Compute values *outside* the `body` builder and persist them in @State or small computed properties.
@@ -139,6 +140,35 @@ struct ContentView: View {
                 }
                 Text(statusLatencyFull).font(.footnote).foregroundStyle(.secondary)
             }
+            
+            HStack {
+                Button("Throughput smoke") {
+                    statusTP = "Throughput: testing…"
+                    MsakShared.QuickTests.shared.throughputSmokeTest(
+                        host: host,
+                        wsPort: Int32(tcpPort) ?? 8080,
+                        directionStr: "download",
+                        streams: 2,
+                        durationMs: 5000,
+                        delayMs: 0,
+                        userAgent: "msak-ios-tester/0.1"
+                    ) { summary, err in
+                        DispatchQueue.main.async {
+                            if let e = err {
+                                if let kt = e as? KotlinThrowable {
+                                    statusTP = "Throughput: error (\(kt.message ?? String(describing: kt)))"
+                                } else {
+                                    statusTP = "Throughput: error (\(String(describing: e)))"
+                                }
+                            } else {
+                                statusTP = summary ?? "Throughput: unknown"
+                            }
+                        }
+                    }
+                }
+                Text(statusTP).font(.footnote).foregroundStyle(.secondary)
+            }
+            
             HStack {
                 Button("UDP open/close") {
                     statusUDP = "UDP: testing…"
