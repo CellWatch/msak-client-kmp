@@ -35,6 +35,9 @@ kotlinx-datetime = { module = "org.jetbrains.kotlinx:kotlinx-datetime", version.
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinxSerializationJson" }
 kotlinx-atomicfu = { module = "org.jetbrains.kotlinx:atomicfu", version.ref = "atomicfu" }
 
+# SLF4J NOP binding
+slf4j-nop = { module = "org.slf4j:slf4j-nop", version = "2.0.13" }
+
 # used by original android msak client (eventually should be removed and replaced with multiplatform, if possible)
 ktor-client-cio = { module = "io.ktor:ktor-client-cio", version.ref = "ktor" }
 
@@ -68,4 +71,4 @@ jetbrains-kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", ve
 jetbrains-kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
 android-application = { id = "com.android.application", version.ref = "agp" }
 android-kotlin-multiplatform-library = { id = "com.android.kotlin.multiplatform.library", version.ref = "agp" }
-kotlinx-atomicfu-plugin = { id = "org.jetbrains.kotlinx.atomicfu", version.ref = "atomicfu" }
+jetbrains-kotlin-atomicfu = { id = "org.jetbrains.kotlin.plugin.atomicfu", version.ref = "kotlin" }

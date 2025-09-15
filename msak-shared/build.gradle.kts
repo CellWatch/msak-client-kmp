@@ -5,7 +5,7 @@ plugins {
     alias(libs.plugins.jetbrains.kotlin.multiplatform)
     alias(libs.plugins.android.kotlin.multiplatform.library)
     alias(libs.plugins.jetbrains.kotlin.serialization)
-    alias(libs.plugins.kotlinx.atomicfu.plugin)
+    alias(libs.plugins.jetbrains.kotlin.atomicfu)
 }
 
 kotlin {

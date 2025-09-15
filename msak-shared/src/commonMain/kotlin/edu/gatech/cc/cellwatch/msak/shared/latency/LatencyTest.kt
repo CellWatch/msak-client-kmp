@@ -168,13 +168,37 @@ class LatencyTest(
     private suspend fun authorize(): LatencyAuthorization {
         Log.d(TAG, "authorize → $authorizeUrl")
         val client = ensureHttp()
-        val text = client.get(authorizeUrl) {
-            userAgent?.let { header("User-Agent", it) }
-        }.bodyAsText()
+
+        val resp = try {
+            client.get(authorizeUrl) {
+                header("Accept", "application/json")
+                userAgent?.let { header("User-Agent", it) }
+                if (serverHost == "10.0.2.2" || serverHost == "127.0.0.1") {
+                    header("Host", "localhost")
+                }
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "authorize: HTTP request failed", t)
+            throw AuthorizeFailureExecption()
+        }
+
+        val status = resp.status.value
+        val body = runCatching { resp.bodyAsText() }.getOrElse { "" }
+
+        if (status !in 200..299) {
+            val hdrs = try { resp.headers.entries().joinToString { (k,v) -> "$k=${v.joinToString()}" } } catch (_: Throwable) { "<no headers>" }
+            Log.e(TAG, "authorize: non-2xx status $status; headers=[$hdrs]; body='${body.take(200)}'")
+            throw UnauthorizedException()
+        }
+        if (body.isBlank()) {
+            Log.e(TAG, "authorize: empty response body from $authorizeUrl")
+            throw UnauthorizedException()
+        }
+
         return try {
-            json.decodeFromString<LatencyAuthorization>(text)
+            json.decodeFromString<LatencyAuthorization>(body)
         } catch (e: SerializationException) {
-            Log.e(TAG, "authorize: JSON decode failed; body='$text'", e)
+            Log.e(TAG, "authorize: JSON decode failed; body='${body.take(200)}'", e)
             throw UnauthorizedException()
         }
     }
