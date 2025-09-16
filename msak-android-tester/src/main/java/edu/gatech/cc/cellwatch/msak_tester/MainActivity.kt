@@ -17,8 +17,6 @@ import edu.gatech.cc.cellwatch.msak.shared.throughput.runThroughput
 import edu.gatech.cc.cellwatch.msak_tester.databinding.ActivityMainBinding
 import kotlinx.coroutines.launch
 
-//import edu.gatech.cc.cellwatch.msak.shared.platform   // <-- from :msak-shared
-
 
 class MainActivity : AppCompatActivity() {
     private val TAG = this::class.simpleName
@@ -47,8 +45,8 @@ class MainActivity : AppCompatActivity() {
 
         // setup buttons
         binding.btnLatency.setOnClickListener { wrapTestRun { testLatency() } }
-        binding.btnDownload.setOnClickListener { wrapTestRun { testThroughputSmoke(ThroughputDirection.DOWNLOAD) } }
-        binding.btnUpload.setOnClickListener { wrapTestRun { testThroughputSmoke(ThroughputDirection.UPLOAD) } }
+        binding.btnDownload.setOnClickListener { wrapTestRun { testThroughput(ThroughputDirection.DOWNLOAD) } }
+        binding.btnUpload.setOnClickListener { wrapTestRun { testThroughput(ThroughputDirection.UPLOAD) } }
 
         // setup output view
         binding.output.movementMethod = ScrollingMovementMethod()
@@ -81,61 +79,68 @@ class MainActivity : AppCompatActivity() {
         binding.output.append("$text\n")
     }
 
+    /** Demonstrates building a LatencyConfig and calling the shared API. */
     private suspend fun testLatency() {
-        // Read host:port and TLS from UI
-        val (hostPort, secure) = readServerFromUi()
-
-        // Parse host and port
-        val parts = hostPort.split(":", limit = 2)
-        val rawHost = parts[0]
-        val httpPort = parts.getOrNull(1)?.toIntOrNull() ?: 8080
-
-        // Android emulator: 127.0.0.1/localhost → 10.0.2.2
-        val host = if (rawHost.equals("localhost", true) || rawHost == "127.0.0.1") "10.0.2.2" else rawHost
-
-        printHeader("Latency (runner)")
-        printMsg("Using latency server $host:$httpPort (secure=$secure)")
-
-        val server = ServerFactory.forLatency(host = host, httpPort = httpPort, useTls = secure)
-
-        val durationMs = binding.latDuration.text.toString().toLongOrNull() ?: 3000L
-        val cfg = LatencyConfig(
-            server = server,
-            measurementId = "android-demo",
-            udpPort = 1053,
-            duration = durationMs,
-            userAgent = USER_AGENT
-        )
-
+        printHeader("Latency test")
+        val cfg = buildLatencyConfig()
+        printMsg("Config → host=${cfg.server.machine} udpPort=${cfg.udpPort} durationMs=${cfg.duration} tls=${binding.localSecure.isChecked}")
         try {
             val summary = runLatency(cfg)
-            printMsg("Latency OK: ${summary.asText()}")
+            printMsg("Result → ${summary.asText()}")
         } catch (t: Throwable) {
             Log.e(TAG, "Latency failed", t)
             printError("Latency failed: ${t.message ?: t::class.simpleName ?: "unknown"}")
         }
     }
 
-    private suspend fun testThroughputSmoke(dir: ThroughputDirection) {
-        // Read desired parameters from UI
+    /** Demonstrates building a ThroughputConfig and calling the shared API. */
+    private suspend fun testThroughput(dir: ThroughputDirection) {
+        printHeader("Throughput ${dir.name.lowercase()} test")
+        val cfg = buildThroughputConfig(dir)
+        printMsg("Config → host=${cfg.server.machine} streams=${cfg.streams} durationMs=${cfg.durationMs} delayMs=${cfg.delayMs} tls=${binding.localSecure.isChecked}")
+        try {
+            val summary = runThroughput(cfg)
+            printMsg("Result → ${summary.asText()}")
+        } catch (t: Throwable) {
+            Log.e(TAG, "Throughput failed", t)
+            printError("Throughput ${dir.name} failed: ${t.message ?: t::class.simpleName ?: "unknown"}")
+        }
+    }
+
+
+    /** Resolve emulator loopback and parse host/port from the UI value. */
+    private fun normalizeHostPort(hostPort: String): Pair<String, Int> {
+        val parts = hostPort.split(":", limit = 2)
+        val rawHost = parts[0].ifBlank { "127.0.0.1" }
+        val port = parts.getOrNull(1)?.toIntOrNull() ?: 8080
+        val host = if (rawHost.equals("localhost", true) || rawHost == "127.0.0.1") "10.0.2.2" else rawHost
+        return host to port
+    }
+
+    /** Build a LatencyConfig from current UI fields to demonstrate the API. */
+    private fun buildLatencyConfig(): LatencyConfig {
+        val (hostPort, secure) = readServerFromUi()
+        val (host, httpPort) = normalizeHostPort(hostPort)
+        val server = ServerFactory.forLatency(host = host, httpPort = httpPort, useTls = secure)
+        val durationMs = binding.latDuration.text.toString().toLongOrNull() ?: 3000L
+        return LatencyConfig(
+            server = server,
+            measurementId = "android-demo",
+            udpPort = 1053,
+            duration = durationMs,
+            userAgent = USER_AGENT
+        )
+    }
+
+    /** Build a ThroughputConfig from current UI fields to demonstrate the API. */
+    private fun buildThroughputConfig(dir: ThroughputDirection): ThroughputConfig {
+        val (hostPort, secure) = readServerFromUi()
+        val (host, wsPort) = normalizeHostPort(hostPort)
+        val server = ServerFactory.forThroughput(host = host, wsPort = wsPort, useTls = secure)
         val streams = binding.tputStreams.text.toString().toIntOrNull() ?: 2
         val durationMs = binding.tputDuration.text.toString().toLongOrNull() ?: 5000L
         val delayMs = binding.tputDelay.text.toString().toLongOrNull() ?: 0L
-        val (hostPort, secure) = readServerFromUi()
-
-        // Parse host and port
-        val parts = hostPort.split(":", limit = 2)
-        val rawHost = parts[0]
-        val wsPort = parts.getOrNull(1)?.toIntOrNull() ?: 8080
-
-        // Android emulator: 127.0.0.1/localhost → 10.0.2.2
-        val host = if (rawHost.equals("localhost", true) || rawHost == "127.0.0.1") "10.0.2.2" else rawHost
-
-        printHeader("Throughput ${dir.name.lowercase()} (runner)")
-        printMsg("Using throughput server $host:$wsPort (secure=$secure)")
-
-        val server = ServerFactory.forThroughput(host = host, wsPort = wsPort, useTls = secure)
-        val cfg = ThroughputConfig(
+        return ThroughputConfig(
             server = server,
             direction = dir,
             streams = streams,
@@ -144,14 +149,6 @@ class MainActivity : AppCompatActivity() {
             measurementId = "android-demo",
             userAgent = USER_AGENT
         )
-
-        try {
-            val summary = runThroughput(cfg)
-            printMsg("Throughput ${dir.name} OK: ${summary.asText()}")
-        } catch (t: Throwable) {
-            Log.e(TAG, "Throughput failed", t)
-            printError("Throughput ${dir.name} failed: ${t.message ?: t::class.simpleName ?: "unknown"}")
-        }
     }
 
     /** Read host:port and secure flag from UI. */
