@@ -44,10 +44,13 @@ dependencies {
     implementation(libs.material)
     implementation(libs.androidx.activity)
     implementation(libs.androidx.constraintlayout)
-    implementation(project(":msak-android"))
+    //implementation(project(":msak-android"))
     implementation(libs.okhttp)
     implementation(libs.conscrypt.android)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+    implementation(libs.slf4j.nop)
+
+    implementation(project(":msak-shared"))
 }

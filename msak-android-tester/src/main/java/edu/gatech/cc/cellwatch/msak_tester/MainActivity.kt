@@ -3,22 +3,30 @@ package edu.gatech.cc.cellwatch.msak_tester
 import android.os.Bundle
 import android.text.method.ScrollingMovementMethod
 import android.util.Log
-import edu.gatech.cc.cellwatch.msak.LATENCY_DURATION
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
-import edu.gatech.cc.cellwatch.msak.latency.LatencyTest
-import edu.gatech.cc.cellwatch.msak.locate.LocateManager
-import edu.gatech.cc.cellwatch.msak.throughput.ThroughputDirection
-import edu.gatech.cc.cellwatch.msak.throughput.ThroughputTest
+import edu.gatech.cc.cellwatch.msak.shared.LATENCY_DURATION
+import edu.gatech.cc.cellwatch.msak.shared.Server
+import edu.gatech.cc.cellwatch.msak.shared.latency.LatencyTest
+import edu.gatech.cc.cellwatch.msak.shared.throughput.ThroughputDirection
+import edu.gatech.cc.cellwatch.msak.shared.throughput.ThroughputTest
+import edu.gatech.cc.cellwatch.msak.shared.LATENCY_AUTHORIZE_PATH
+import edu.gatech.cc.cellwatch.msak.shared.LATENCY_RESULT_PATH
+import edu.gatech.cc.cellwatch.msak.shared.THROUGHPUT_UPLOAD_PATH
+import edu.gatech.cc.cellwatch.msak.shared.THROUGHPUT_DOWNLOAD_PATH
 import edu.gatech.cc.cellwatch.msak_tester.databinding.ActivityMainBinding
 import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 import kotlin.math.pow
 import kotlin.math.roundToInt
+
+//import edu.gatech.cc.cellwatch.msak.shared.platform   // <-- from :msak-shared
+
 
 class MainActivity : AppCompatActivity() {
     private val TAG = this::class.simpleName
@@ -38,7 +46,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         // setup defaults
-        binding.localHost.setText("localhost:8080")
+        binding.localHost.setText("10.0.2.2:8080")
         binding.localSecure.isChecked = false
         binding.latDuration.setText("$LATENCY_DURATION")
         binding.tputStreams.setText("3")
@@ -47,8 +55,8 @@ class MainActivity : AppCompatActivity() {
 
         // setup buttons
         binding.btnLatency.setOnClickListener { wrapTestRun { testLatency() } }
-        binding.btnDownload.setOnClickListener { wrapTestRun { testThroughput(ThroughputDirection.DOWNLOAD) } }
-        binding.btnUpload.setOnClickListener { wrapTestRun { testThroughput(ThroughputDirection.UPLOAD) } }
+        binding.btnDownload.setOnClickListener { wrapTestRun { testThroughputSmoke(ThroughputDirection.DOWNLOAD) } }
+        binding.btnUpload.setOnClickListener { wrapTestRun { testThroughputSmoke(ThroughputDirection.UPLOAD) } }
 
         // setup output view
         binding.output.movementMethod = ScrollingMovementMethod()
@@ -81,61 +89,72 @@ class MainActivity : AppCompatActivity() {
         binding.output.append("$text\n")
     }
 
-    fun getLocateManager(): LocateManager {
-        val localServerHost = binding.localHost.text.toString()
-        val localServerSecure = binding.localSecure.isChecked
+    private suspend fun testLatency() {
+        // Read host:port and TLS from UI
+        val (hostPort, secure) = readServerFromUi()
 
-        return LocateManager(
-            serverEnv = if (localServerHost.isEmpty()) LocateManager.ServerEnv.PROD else LocateManager.ServerEnv.LOCAL,
-            userAgent = USER_AGENT,
-            msakLocalServerHost = localServerHost,
-            msakLocalServerSecure = localServerSecure,
+        // Split host:port
+        val parts = hostPort.split(":", limit = 2)
+        val hostOnly = parts[0]
+        val httpPort = parts.getOrNull(1)?.toIntOrNull() ?: 8080
+
+        // Android emulator: 127.0.0.1/localhost → 10.0.2.2
+        val host = if (hostOnly.equals("localhost", true) || hostOnly == "127.0.0.1") "10.0.2.2" else hostOnly
+
+        // Delegate to shared KMP helper for parity with iOS
+        val summary = edu.gatech.cc.cellwatch.msak.shared.net.QuickTests.latencyFull(
+            host = host,
+            httpPort = httpPort,
+            udpPort = 1053,
+            durationMs = 3000,
+            mid = "localtest",
+            userAgent = USER_AGENT
         )
+
+        printMsg(summary)
     }
 
-    suspend fun testLatency() {
-        val duration = binding.latDuration.text.toString().toLong()
-        val locateManager = getLocateManager()
+    private suspend fun testThroughputSmoke(dir: ThroughputDirection) {
+        // Read desired parameters from UI
+        val streams = binding.tputStreams.text.toString().toIntOrNull() ?: 1
+        val durationMs = binding.tputDuration.text.toString().toLongOrNull() ?: 3000L
+        val delayMs = binding.tputDelay.text.toString().toLongOrNull() ?: 0L
+        val (hostPort, secure) = readServerFromUi()
 
-        try {
-            printHeader("Locating latency server")
-            val server = locateManager.locateLatencyServers().firstOrNull()
-            if (server == null) {
-                printError("No latency server found")
-                return
+        // Determine host and WS port from the UI field
+        val parts = hostPort.split(":", limit = 2)
+        val rawHost = parts[0]
+        val wsPort = parts.getOrNull(1)?.toIntOrNull() ?: 8080
+
+        // Android emulator: 127.0.0.1/localhost → 10.0.2.2
+        val host = if (rawHost.equals("localhost", true) || rawHost == "127.0.0.1") "10.0.2.2" else rawHost
+
+        // Direction string expected by QuickTests
+        val directionStr = if (dir == ThroughputDirection.DOWNLOAD) "download" else "upload"
+
+        printHeader("Throughput ${dir.name.lowercase()} (shared KMP smoke)")
+        printMsg("Using throughput server $host:$wsPort (from=$hostPort, secure=$secure)")
+
+        // Bridge the callback-style API to suspend so wrapTestRun can await completion
+        suspendCancellableCoroutine<Unit> { cont ->
+            edu.gatech.cc.cellwatch.msak.shared.net.QuickTests.throughputSmokeTest(
+                host = host,
+                wsPort = wsPort,
+                directionStr = directionStr,
+                streams = streams,
+                durationMs = durationMs,
+                delayMs = delayMs,
+                userAgent = USER_AGENT
+            ) { summary, throwable ->
+                if (throwable != null) {
+                    Log.e(TAG, "throughput smoke test failed", throwable)
+                    printError("Throughput smoke test failed: ${throwable.message ?: throwable::class.simpleName ?: "unknown"}")
+                } else {
+                    printMsg(summary ?: "")
+                }
+                if (cont.isActive) cont.resume(Unit)
             }
-            printMsg("Using latency server ${server.machine} in ${server.location}")
-
-            printHeader("Running latency test")
-            val test = LatencyTest(server, duration = duration, userAgent = USER_AGENT)
-            test.start()
-            test.updatesChan.consumeEach { update ->
-                Log.v(TAG, "latency update: $update")
-            }
-
-            if (test.error != null) {
-                Log.w(TAG, "latency test failed", test.error)
-                printError("Latency test failed: ${test.error}")
-                return
-            }
-
-            val result = test.result
-            if (result == null) {
-                printError("Missing latency result")
-                return
-            }
-
-            val rtts = result.RoundTrips.filter { !it.Lost }.map { it.RTT / 1000.0 }
-            val meanRTT = rtts.average()
-            val stddev = (rtts.sumOf { (it - meanRTT).pow(2) } / rtts.size).pow(0.5)
-
-            printMsg("Lost ${result.PacketsReceived - result.PacketsSent} of ${result.PacketsSent + result.PacketsReceived} packets")
-            printMsg("Mean RTT: ${meanRTT.roundToInt()} ms")
-            printMsg("RTT stddev: ${stddev.roundToInt()} ms")
-            printMsg("Latency test complete")
-        } catch (e: Exception) {
-            Log.e(TAG, "latency test failed", e)
-            printError("Latency test failed: $e")
+            cont.invokeOnCancellation { /* no-op */ }
         }
     }
 
@@ -143,23 +162,24 @@ class MainActivity : AppCompatActivity() {
         val streams = binding.tputStreams.text.toString().toInt()
         val duration = binding.tputDuration.text.toString().toLong()
         val delay = binding.tputDelay.text.toString().toLong()
-        val locateManager = getLocateManager()
+        val (hostPort, secure) = readServerFromUi()
 
         try {
-            printHeader("Locating throughput server")
-            val server = locateManager.locateThroughputServers().firstOrNull()
-            if (server == null) {
-                printError("No throughput server found")
-                return
-            }
-            printMsg("Using throughput server ${server.machine} at ${server.location}")
+            printHeader("Throughput ${dir.name.lowercase()} (shared KMP)")
+            val server = buildLocalServer(hostPort, secure)
+            printMsg("Using throughput server ${server.machine} (host=${hostPort}, secure=${secure})")
 
-            printHeader("Running ${dir.name.lowercase()} test")
             val test = ThroughputTest(server, dir, streams, duration, delay, userAgent = USER_AGENT)
             test.start()
 
+            val fromServerWanted = (dir == ThroughputDirection.UPLOAD)
+            val lastRecvByStream = mutableMapOf<Int, edu.gatech.cc.cellwatch.msak.shared.throughput.ThroughputUpdate>()
+
             test.updatesChan.consumeEach { update ->
                 Log.v(TAG, "throughput update: $update")
+                if (update.fromServer == fromServerWanted) {
+                    lastRecvByStream[update.stream] = update
+                }
             }
 
             var sumAppMbps = 0.0
@@ -170,16 +190,16 @@ class MainActivity : AppCompatActivity() {
                     Log.w(TAG, "throughput stream ${i + 1} failed", stream.error)
                     printError("Throughput stream ${i + 1} failed: ${stream.error}")
                 } else {
-                    val update = stream.updates.lastOrNull { it.fromServer == (dir == ThroughputDirection.UPLOAD) }
+                    val update = lastRecvByStream[stream.id]
                     if (update == null) {
                         printError("No receiver updates for stream ${i + 1}")
                     } else {
                         val appBytes = update.measurement.Application.BytesReceived
                         val netBytes = update.measurement.Network?.BytesReceived
-                        val usecs = update.measurement.ElapsedTime
-                        val secs = usecs.toDouble() / 1000000.0
-                        val appMbps = calcMbps(appBytes, usecs)
-                        val netMbps = calcMbps(netBytes, usecs)
+                        val elapsed = update.measurement.ElapsedTime // server uses microseconds
+                        val secs = elapsed.toDouble() / 1_000_000.0
+                        val appMbps = calcMbps(appBytes, elapsed)
+                        val netMbps = calcMbps(netBytes, elapsed)
 
                         sumAppMbps += appMbps
                         sumNetMbps += netMbps
@@ -205,7 +225,44 @@ class MainActivity : AppCompatActivity() {
         return ((bytes ?: 0).toDouble() * 8.0 / 1000000.0) / (usecs.toDouble() / 1000000.0)
     }
 
+    /** Read host:port and secure flag from UI. */
+    private fun readServerFromUi(): Pair<String, Boolean> {
+        val hostPort = binding.localHost.text.toString().ifBlank { "127.0.0.1:8080" }
+        val secure = binding.localSecure.isChecked
+        return hostPort to secure
+    }
+
+    /**
+     * Construct a minimal `Server` object using the shared KMP model.
+     * We provide concrete URLs for both WS/WSS and HTTP/HTTPS lookups keyed by the
+     * shared `Server` convention of "scheme:///path" so that the `Server` helpers
+     * can compose full URLs correctly.
+     */
+    private fun buildLocalServer(hostPort: String, secure: Boolean): Server {
+        val wsScheme = if (secure) "wss" else "ws"
+        val httpScheme = if (secure) "https" else "http"
+        val urls = mapOf(
+            // Throughput
+            "wss:///" + THROUGHPUT_UPLOAD_PATH to "${wsScheme}://${hostPort}/${THROUGHPUT_UPLOAD_PATH}",
+            "ws:///" + THROUGHPUT_UPLOAD_PATH to "${wsScheme}://${hostPort}/${THROUGHPUT_UPLOAD_PATH}",
+            "wss:///" + THROUGHPUT_DOWNLOAD_PATH to "${wsScheme}://${hostPort}/${THROUGHPUT_DOWNLOAD_PATH}",
+            "ws:///" + THROUGHPUT_DOWNLOAD_PATH to "${wsScheme}://${hostPort}/${THROUGHPUT_DOWNLOAD_PATH}",
+            // Latency
+            "https:///" + LATENCY_AUTHORIZE_PATH to "${httpScheme}://${hostPort}/${LATENCY_AUTHORIZE_PATH}",
+            "http:///" + LATENCY_AUTHORIZE_PATH to "${httpScheme}://${hostPort}/${LATENCY_AUTHORIZE_PATH}",
+            "https:///" + LATENCY_RESULT_PATH to "${httpScheme}://${hostPort}/${LATENCY_RESULT_PATH}",
+            "http:///" + LATENCY_RESULT_PATH to "${httpScheme}://${hostPort}/${LATENCY_RESULT_PATH}",
+        )
+        return Server(
+            machine = hostPort,
+            location = null,
+            urls = urls,
+        )
+    }
+
     companion object {
         const val USER_AGENT = "msak-android/test"
     }
 }
+    // Helper to format double to 2 decimal places
+    private fun fmt2(v: Double): String = String.format("%.2f", v)

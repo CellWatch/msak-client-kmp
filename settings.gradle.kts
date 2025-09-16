@@ -22,3 +22,4 @@ dependencyResolutionManagement {
 rootProject.name = "msak-android"
 include(":msak-android")
 include(":msak-android-tester")
+include(":msak-shared")

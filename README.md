@@ -1,4 +1,4 @@
-# msak-android
+# msak-client-kmp
 
 An Android client for the [Measurement Lab](https://www.measurementlab.net/)'s [MSAK](https://github.com/m-lab/msak) measurement server. Uses the [Locate API](https://github.com/m-lab/locate/blob/main/USAGE.md) to select a measurement server and runs latency and throughput (download and upload speed) tests.
 
