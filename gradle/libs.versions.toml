@@ -10,6 +10,8 @@ espressoCore = "3.5.1"
 appcompat = "1.7.0"
 kotlinxDatetime = "0.6.0"
 kotlinxSerializationJson = "1.7.3"
+kotlinxCoroutines = "1.9.0"        # If you hit compatibility warnings with Kotlin 2.1.21, use "1.8.1"
+kmpNativeCoroutines = "1.0.0-ALPHA-44"
 ktor = "3.0.0"
 atomicfu = "0.27.0"
 
@@ -34,6 +36,9 @@ androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version
 kotlinx-datetime = { module = "org.jetbrains.kotlinx:kotlinx-datetime", version.ref = "kotlinxDatetime" }
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinxSerializationJson" }
 kotlinx-atomicfu = { module = "org.jetbrains.kotlinx:atomicfu", version.ref = "atomicfu" }
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinxCoroutines" }
+kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "kotlinxCoroutines" }
+
 
 # SLF4J NOP binding
 slf4j-nop = { module = "org.slf4j:slf4j-nop", version = "2.0.13" }
@@ -72,3 +77,5 @@ jetbrains-kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serializati
 android-application = { id = "com.android.application", version.ref = "agp" }
 android-kotlin-multiplatform-library = { id = "com.android.kotlin.multiplatform.library", version.ref = "agp" }
 jetbrains-kotlin-atomicfu = { id = "org.jetbrains.kotlin.plugin.atomicfu", version.ref = "kotlin" }
+
+kmp-nativecoroutines = { id = "com.rickclephas.kmp.nativecoroutines", version.ref = "kmpNativeCoroutines" }

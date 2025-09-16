@@ -6,9 +6,15 @@ plugins {
     alias(libs.plugins.android.kotlin.multiplatform.library)
     alias(libs.plugins.jetbrains.kotlin.serialization)
     alias(libs.plugins.jetbrains.kotlin.atomicfu)
+    alias(libs.plugins.kmp.nativecoroutines) // from libs.versions.toml
 }
 
 kotlin {
+
+    compilerOptions {
+        freeCompilerArgs.add("-Xexpect-actual-classes")
+    }
+
 
 // Target declarations - add or remove as needed below. These define
 // which platforms this KMP module supports.
@@ -52,9 +58,15 @@ kotlin {
 // common to share sources between related targets.
 // See: https://kotlinlang.org/docs/multiplatform-hierarchy.html
     sourceSets {
+        // Ensure all source sets opt-in consistently to avoid hierarchy mismatches
+        all {
+            languageSettings.optIn("kotlinx.serialization.ExperimentalSerializationApi")
+        }
         commonMain {
+
             dependencies {
                 implementation(libs.kotlin.stdlib)
+                implementation(libs.kotlinx.coroutines.core)
                 // Add KMP dependencies here
 
                 // Ktor client and WebSockets
@@ -77,6 +89,7 @@ kotlin {
 
         androidMain {
             dependencies {
+                implementation(libs.kotlinx.coroutines.android)
                 // Add Android-specific dependencies here. Note that this source set depends on
                 // commonMain by default and will correctly pull the Android artifacts of any KMP
                 // dependencies declared in commonMain.
