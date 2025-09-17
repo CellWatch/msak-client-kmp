@@ -2,6 +2,8 @@
 
 An Android client for the [Measurement Lab](https://www.measurementlab.net/)'s [MSAK](https://github.com/m-lab/msak) measurement server. Uses the [Locate API](https://github.com/m-lab/locate/blob/main/USAGE.md) to select a measurement server and runs latency and throughput (download and upload speed) tests.
 
+Used for CellWatch App
+
 ## Important caveat for throughput tests: Conscrypt required with TLS
 
 Due to the lack of a suitable WebSocket client for Android that provides access to detailed socket information, the transport-layer byte counts are gathered via a bit of a hack. In our testing, the app must use the Conscrypt security provider to get correct transport-layer byte counts when accessing MSAK servers over TLS. Adding a dependency on `org.conscrypt:conscrypt-android` and then adding the following early in your app's initialization should do the trick:
