@@ -1,5 +1,6 @@
 package edu.gatech.cc.cellwatch.msak_tester
 
+import android.net.Uri
 import android.os.Bundle
 import android.text.method.ScrollingMovementMethod
 import android.util.Log
@@ -11,6 +12,9 @@ import androidx.lifecycle.lifecycleScope
 import edu.gatech.cc.cellwatch.msak.shared.ServerFactory
 import edu.gatech.cc.cellwatch.msak.shared.latency.LatencyConfig
 import edu.gatech.cc.cellwatch.msak.shared.latency.runLatency
+import edu.gatech.cc.cellwatch.msak.shared.locate.LocateManager
+import edu.gatech.cc.cellwatch.msak.shared.net.NetHttp
+import edu.gatech.cc.cellwatch.msak.shared.net.NetHttpConfig
 import edu.gatech.cc.cellwatch.msak.shared.throughput.ThroughputConfig
 import edu.gatech.cc.cellwatch.msak.shared.throughput.ThroughputDirection
 import edu.gatech.cc.cellwatch.msak.shared.throughput.runThroughput
@@ -25,6 +29,16 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Initialize shared KMP HTTP client once per process
+        NetHttp.initialize(
+            NetHttpConfig(
+                userAgent = USER_AGENT,
+                requestTimeoutMs = 15_000,
+                connectTimeoutMs = 10_000,
+                verboseLogging = false
+            )
+        )
 
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
@@ -47,6 +61,9 @@ class MainActivity : AppCompatActivity() {
         binding.btnLatency.setOnClickListener { wrapTestRun { testLatency() } }
         binding.btnDownload.setOnClickListener { wrapTestRun { testThroughput(ThroughputDirection.DOWNLOAD) } }
         binding.btnUpload.setOnClickListener { wrapTestRun { testThroughput(ThroughputDirection.UPLOAD) } }
+
+        // locate button
+        binding.btnLocate.setOnClickListener { wrapTestRun { locateAndPopulate() } }
 
         // setup output view
         binding.output.movementMethod = ScrollingMovementMethod()
@@ -156,6 +173,50 @@ class MainActivity : AppCompatActivity() {
         val hostPort = binding.localHost.text.toString().ifBlank { "127.0.0.1:8080" }
         val secure = binding.localSecure.isChecked
         return hostPort to secure
+    }
+
+    /** Use Locate API to find a public server, update UI host/secure accordingly, and print selection. */
+    private suspend fun locateAndPopulate() {
+        printHeader("Locate")
+        try {
+            val lm = LocateManager(LocateManager.ServerEnv.PROD, userAgent = USER_AGENT)
+            // Prefer throughput WS for populating host/port + TLS
+            val tServers = lm.locateThroughputServers()
+            val chosen = tServers.firstOrNull() ?: run {
+                printError("No throughput servers returned")
+                return
+            }
+            val wsDownload = chosen.urls["ws:///throughput/v1/download"]
+                ?: chosen.urls["ws:///throughput/v1/upload"]
+                ?: run {
+                    printError("Located server missing throughput URLs")
+                    return
+                }
+            val (host, port, secure) = parseHostPortSecure(wsDownload)
+            // Apply to UI so subsequent tests use this endpoint
+            binding.localHost.setText("$host:$port")
+            binding.localSecure.isChecked = secure
+            printMsg("Located → ${chosen.machine} | ws=${wsDownload} → host=$host port=$port tls=$secure")
+            printMsg("You can now tap Download/Upload/Latency to run against this server")
+        } catch (t: Throwable) {
+            printError("Locate failed: ${t.message ?: t::class.simpleName ?: "unknown"}")
+        }
+    }
+
+    /** Parse ws/wss/http/https URL into host, port, and TLS flag. */
+    private fun parseHostPortSecure(url: String): Triple<String, Int, Boolean> {
+        val u = Uri.parse(url)
+        val scheme = (u.scheme ?: "").lowercase()
+        val host = u.host ?: ""
+        val port = if (u.port != -1) u.port else defaultPortForScheme(scheme)
+        val secure = scheme == "wss" || scheme == "https"
+        return Triple(host, port, secure)
+    }
+
+    private fun defaultPortForScheme(s: String): Int = when (s) {
+        "wss", "https" -> 443
+        "ws", "http" -> 80
+        else -> 0
     }
 
     companion object {

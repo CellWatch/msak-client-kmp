@@ -64,6 +64,7 @@ class ThroughputTest(
             direction,
             userAgent = userAgent,
             wsFactory = wsFactory,
+            streamsHint = numStreams,
         )
     }
 

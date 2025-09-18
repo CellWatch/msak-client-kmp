@@ -1,35 +1,69 @@
 package edu.gatech.cc.cellwatch.msak.shared
 
 import edu.gatech.cc.cellwatch.msak.shared.throughput.ThroughputDirection
-import io.ktor.http.URLBuilder
+import kotlinx.serialization.Serializable
 import io.ktor.http.Url
+import io.ktor.http.URLParserException
 
 /**
- * A measurement server returned by the Locate API.
+ * A measurement server returned by the Locate API or synthesized for local/dev.
  *
- * @param machine The server's name.
- * @param location The geographic location of the server.
- * @param urls A mapping of measurement service URL templates to the complete URL for the service on
- *             the specified machine.
+ * For servers returned by Locate, the entries in [urls] are already fully-formed absolute URLs and
+ * must be used verbatim. Do not amend scheme/host/port or add/remove query parameters.
+ *
+ * For local/dev use, construct this class via ServerFactory which produces absolute URLs in [urls]
+ * using the same keys that Locate uses. This class intentionally does not stitch host/port itself.
+ *
+ * Keys in [urls] that this class understands:
+ *  - "wss:///throughput/v1/download", "ws:///throughput/v1/download"
+ *  - "wss:///throughput/v1/upload",   "ws:///throughput/v1/upload"
+ *  - "https:///latency/v1/authorize", "http:///latency/v1/authorize"
+ *  - "https:///latency/v1/result",    "http:///latency/v1/result"
  */
+@Serializable
 open class Server(
     val machine: String,
-    val location: ServerLocation?,
+    val location: ServerLocation? = null,
     val urls: Map<String, String>,
 ) {
+
+    private fun missingUrlError(kind: String, path: String): IllegalStateException {
+        val tried = when (kind) {
+            "throughput" -> "wss:///$path, ws:///$path"
+            "latency"    -> "https:///$path, http:///$path"
+            else         -> "wss/http variants for $path"
+        }
+        return IllegalStateException(
+            "No $kind URL found in Server.urls for '$path'. " +
+            "Tried keys: [$tried]. If using Locate, pass the server as returned. " +
+            "For local/dev, construct URLs via ServerFactory with full endpoints."
+        )
+    }
+
+    /**
+     * Return the first present value for any of [candidates], validate it as a URL, and return it.
+     * The value must already be an absolute URL. We never patch ports or query parameters here.
+     */
+    private fun selectAbsoluteUrl(kind: String, path: String, candidates: List<String>): String {
+        val raw = candidates.firstNotNullOfOrNull { urls[it] }
+            ?: throw missingUrlError(kind, path)
+        // Validate and normalize; throws URLParserException if malformed.
+        try {
+            Url(raw)
+        } catch (e: URLParserException) {
+            throw IllegalStateException(
+                "Malformed $kind URL for '$path': '$raw'. " +
+                "Ensure the map value is an absolute URL from Locate or ServerFactory.",
+                e
+            )
+        }
+        return raw
+    }
 
     /**
      * Get the full URL used to initiate a throughput test to this server.
      *
-     * @param direction The desired direction of the throughput test.
-     * @param streams The anticipated total number of concurrent TCP streams that will be used to
-     *                measure throughput.
-     * @param duration The anticipated duration of the throughput test in milliseconds.
-     * @param delay The anticipated delay in milliseconds between the initiation of each TCP stream.
-     * @param measurementId A unique identifier for the throughput measurement. This parameter is
-     *                      typically not needed if the Server was returned from a LocateManager.
-     *
-     * @return The full URL used to initiate a throughput test to this server.
+     * The URL is returned exactly as provided by [urls]; we do not append ports or query params.
      */
     fun getThroughputUrl(
         direction: ThroughputDirection,
@@ -39,53 +73,42 @@ open class Server(
         measurementId: String?,
     ): String {
         val path = when (direction) {
-            ThroughputDirection.UPLOAD -> THROUGHPUT_UPLOAD_PATH
+            ThroughputDirection.UPLOAD   -> THROUGHPUT_UPLOAD_PATH
             ThroughputDirection.DOWNLOAD -> THROUGHPUT_DOWNLOAD_PATH
         }
-
-        val url = URLBuilder(Url(urls["wss:///$path"] ?: urls ["ws:///$path"] ?: throw Exception("no URL found")))
-
-        url.parameters["streams"] = "$streams"
-        url.parameters["duration"] = "$duration"
-        url.parameters["delay"] = "$delay"
-        if (measurementId != null) {
-            url.parameters["mid"] = measurementId
-        }
-
-        return url.buildString()
+        return selectAbsoluteUrl(
+            kind = "throughput",
+            path = path,
+            candidates = listOf("wss:///$path", "ws:///$path")
+        )
     }
 
     /**
-     * Get the full URL used to initiate a throughput test to this server.
+     * Get the full URL used to initiate a latency measurement (authorize).
      *
-     * @param measurementId A unique identifier for the latency measurement. This parameter is
-     *                      typically not needed if the Server was returned from a LocateManager.
+     * The URL is returned exactly as provided by [urls]; we do not append ports or query params.
      */
     fun getLatencyAuthorizeUrl(measurementId: String? = null): String {
-        return getLatencyUrl(LATENCY_AUTHORIZE_PATH, measurementId)
+        val path = LATENCY_AUTHORIZE_PATH
+        return selectAbsoluteUrl(
+            kind = "latency",
+            path = path,
+            candidates = listOf("https:///$path", "http:///$path")
+        )
     }
 
     /**
      * Get the full URL used to fetch the results of a latency measurement.
      *
-     * @param measurementId The unique identifier of the latency measurement. This parameter should
-     *                      match the measurementId provided to getLatencyAuthorizeUrl.
+     * The URL is returned exactly as provided by [urls]; we do not append ports or query params.
      */
     fun getLatencyResultUrl(measurementId: String? = null): String {
-        return getLatencyUrl(LATENCY_RESULT_PATH, measurementId)
-    }
-
-    private fun getLatencyUrl(
-        path: String,
-        measurementId: String?,
-    ): String {
-        val url = URLBuilder(Url(urls["https:///$path"] ?: urls ["http:///$path"] ?: throw Exception("no URL found")))
-
-        if (measurementId != null) {
-            url.parameters["mid"] = measurementId
-        }
-
-        return url.buildString()
+        val path = LATENCY_RESULT_PATH
+        return selectAbsoluteUrl(
+            kind = "latency",
+            path = path,
+            candidates = listOf("https:///$path", "http:///$path")
+        )
     }
 
     override fun equals(other: Any?): Boolean {

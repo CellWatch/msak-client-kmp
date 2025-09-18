@@ -1,5 +1,6 @@
 import SwiftUI
 import MsakShared
+import Foundation
 
 struct ContentView: View {
     // MARK: - Inputs
@@ -9,6 +10,12 @@ struct ContentView: View {
     @State private var tpStreams: String = "2"
     @State private var tpDurationMs: String = "5000"
     @State private var tpDelayMs: String = "0"
+    @State private var netHttpReady: Bool = false
+    private let USER_AGENT = "msak-ios-tester/0.2"
+    @State private var currentServer: MsakShared.Server? = nil
+    @State private var suppressLocateUpdateSideEffects: Bool = false
+    private enum ServerSource { case local, located }
+    @State private var serverSource: ServerSource = .local
 
     // MARK: - Focus management
     @FocusState private var focusedField: Field?
@@ -23,6 +30,7 @@ struct ContentView: View {
     @State private var logLines: [String] = []
 
     private func appendLog(_ line: String) {
+        print(line)
         DispatchQueue.main.async {
             logLines.append(line)
             if logLines.count > 200 {
@@ -40,18 +48,46 @@ struct ContentView: View {
                     // Server
                     GroupBox("Server") {
                         VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text("Host")
-                                TextField("127.0.0.1", text: $host)
-                                    .textInputAutocapitalization(.never)
-                                    .autocorrectionDisabled()
-                                    .textFieldStyle(.roundedBorder)
-                                    .multilineTextAlignment(.trailing)
-                                    .focused($focusedField, equals: .host)
-                                    .submitLabel(.done)
+                    HStack(spacing: 8) {
+                        Text("Host")
+                        TextField("127.0.0.1", text: $host)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .textFieldStyle(.roundedBorder)
+                            .multilineTextAlignment(.trailing)
+                            .focused($focusedField, equals: .host)
+                            .submitLabel(.done)
+                            .onChange(of: host) { _ in
+                                // Ignore changes when a located server is active or when we're programmatically updating fields
+                                if suppressLocateUpdateSideEffects || serverSource == .located { return }
+                                // User is editing manually; switch to a local server config.
+                                currentServer = nil
+                                serverSource = .local
+                                rebuildLocalServerFromFields()
                             }
+                        // Two locate buttons: latency (left), throughput (right)
+                        Button("📍L") { runLocateLatency() }
+                            .buttonStyle(.bordered)
+                            .accessibilityLabel("Locate latency")
+                            .font(.system(size: 14))
+                            .frame(minWidth: 28, minHeight: 28)
+                            .help("Locate nearest public MSAK latency server and populate host/TLS")
+                        Button("📍T") { runLocateThroughput() }
+                            .buttonStyle(.bordered)
+                            .accessibilityLabel("Locate throughput")
+                            .font(.system(size: 14))
+                            .frame(minWidth: 28, minHeight: 28)
+                            .help("Locate nearest public MSAK throughput server and populate host/TLS")
+                    }
                             Toggle("Use HTTPS/WSS", isOn: $useTLS)
-                                .help("If enabled, endpoints should be https/wss. Current ServerFactory() helpers construct http/ws; update ServerFactory if you need TLS here.")
+                                .help("If enabled, endpoints will use https/wss for locally built servers.")
+                                .onChange(of: useTLS) { _ in
+                                    // Ignore programmatic updates during Locate and while a located server is active.
+                                    if suppressLocateUpdateSideEffects || serverSource == .located { return }
+                                    currentServer = nil
+                                    serverSource = .local
+                                    rebuildLocalServerFromFields()
+                                }
                         }
                     }
 
@@ -141,16 +177,186 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .ignoresSafeArea(.keyboard) // let keyboard appear over content instead of resizing it
+        .onAppear {
+            ensureNetHttpInitialized()
+            if currentServer == nil && serverSource == .local { rebuildLocalServerFromFields() }
+        }
     }
 
-    // MARK: - Server builders (prep for TLS-aware ServerFactory)
-    private func buildLatencyServer() -> Server {
-        // TODO: when ServerFactory.forLatency(host:httpPort:useTls:) is available, pass useTLS here.
-        return ServerFactory.shared.forLatency(host: host, httpPort: 8080)
+    // Parse "host[:port]" into (host, port?)
+    private func splitHostPort(_ value: String) -> (String, Int?) {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return ("127.0.0.1", nil) }
+        if let idx = trimmed.lastIndex(of: ":"),
+           // ensure we only treat it as host:port if port looks numeric
+           idx < trimmed.endIndex,
+           let port = Int(trimmed[trimmed.index(after: idx)...]) {
+            let h = String(trimmed[..<idx])
+            return (h, port)
+        }
+        return (trimmed, nil)
     }
-    private func buildThroughputServer() -> Server {
-        // TODO: when ServerFactory.forThroughput(host:wsPort:useTls:) is available, pass useTLS here.
-        return ServerFactory.shared.forThroughput(host: host, wsPort: 8080)
+
+    // MARK: - Server builders (TLS-aware unified ServerFactory)
+    private func rebuildLocalServerFromFields() {
+        let (h, pOpt) = splitHostPort(host)
+        let p = Int32(pOpt ?? (useTLS ? 443 : 8080))
+        // Build a complete local Server (both latency & throughput endpoints) using the unified factory.
+        // This is ONLY for local/dev. Located servers are kept verbatim in `currentServer`.
+        let srv = ServerFactory.shared.buildServer(
+            host: h,
+            port: p,
+            useTls: useTLS,
+            includeLatency: true,
+            includeThroughput: true,
+            measurementId: "ios-demo",
+            latencyPathPrefix: "latency/v1",
+            throughputPathPrefix: "throughput/v1"
+        )
+        currentServer = srv
+        serverSource = .local
+        appendLog("Server built (local): host=\(h) port=\(p) tls=\(useTLS)")
+    }
+
+    // Single source of truth: use located server if present, otherwise build a local one
+    private func activeServer() -> Server {
+        if let s = currentServer {
+            appendLog("Using existing server (\(serverSource == .located ? "located" : "local")) → \(s.machine)")
+            return s
+        }
+        let (h, pOpt) = splitHostPort(host)
+        let p = Int32(pOpt ?? (useTLS ? 443 : 8080))
+        let s = ServerFactory.shared.buildServer(
+            host: h,
+            port: p,
+            useTls: useTLS,
+            includeLatency: true,
+            includeThroughput: true,
+            measurementId: "ios-demo",
+            latencyPathPrefix: "latency/v1",
+            throughputPathPrefix: "throughput/v1"
+        )
+        serverSource = .local
+        currentServer = s
+        appendLog("Server built (implicit local): host=\(h) port=\(p) tls=\(useTLS)")
+        return s
+    }
+
+    // MARK: - Locator integration (KMP LocateManager)
+    private func ensureNetHttpInitialized() {
+        if netHttpReady { return }
+        // Kotlin `object` NetHttp is bridged as a singleton with `shared`
+        MsakShared.NetHttp.shared.initialize(config: MsakShared.NetHttpConfig(
+            userAgent: USER_AGENT,
+            requestTimeoutMs: 15_000,
+            connectTimeoutMs: 10_000,
+            verboseLogging: false
+        ))
+        netHttpReady = true
+    }
+
+    // Locate latency server and populate host/TLS fields
+    private func runLocateLatency() {
+        ensureNetHttpInitialized()
+        appendLog("Locate (latency): starting")
+        Task {
+            do {
+                let lm = MsakShared.LocateManager(
+                    serverEnv: MsakShared.LocateManager.ServerEnv.prod,
+                    locateBaseUrl: nil,
+                    userAgent: USER_AGENT,
+                    msakLocalServerHost: nil,
+                    msakLocalServerSecure: false
+                )
+                let lServers = try await lm.locateLatencyServers(limitToSiteOf: nil)
+                guard let chosen = lServers.first else {
+                    appendLog("Locate (latency): no latency servers returned")
+                    return
+                }
+                // Prefer https latency authorize, then http
+                let urls = chosen.urls
+                var latencyUrl: String? = nil
+                if let u = urls["https:///latency/v1/authorize"] as? String { latencyUrl = u }
+                if latencyUrl == nil, let u = urls["http:///latency/v1/authorize"] as? String { latencyUrl = u }
+                guard let lurl = latencyUrl, let comps = URLComponents(string: lurl) else {
+                    appendLog("Locate (latency): missing or invalid latency authorize URL in server response")
+                    return
+                }
+                let h = comps.host ?? ""
+                let scheme = (comps.scheme ?? "").lowercased()
+                let defaultPort = (scheme == "https") ? 443 : 80
+                let p = comps.port ?? defaultPort
+                let tls = (scheme == "https")
+
+                // Update UI fields
+                await MainActor.run {
+                    self.suppressLocateUpdateSideEffects = true
+                    self.host = "\(h):\(p)"
+                    self.useTLS = tls
+                    self.currentServer = chosen
+                    self.serverSource = .located
+                    self.suppressLocateUpdateSideEffects = false
+                    self.appendLog("Server set from Locate (latency) → host=\(h) port=\(p) tls=\(tls)")
+                }
+                appendLog("Locate (latency): selected \(chosen.machine) → host=\(h) port=\(p) tls=\(tls)")
+                appendLog("You can now run Latency/Download/Upload against this server")
+            } catch {
+                appendLog("Locate (latency) error: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    // Locate throughput server and populate host/TLS fields
+    private func runLocateThroughput() {
+        ensureNetHttpInitialized()
+        appendLog("Locate (throughput): starting")
+        Task {
+            do {
+                // Default env = PROD; pass userAgent for observability
+                let lm = MsakShared.LocateManager(
+                    serverEnv: MsakShared.LocateManager.ServerEnv.prod,
+                    locateBaseUrl: nil,
+                    userAgent: USER_AGENT,
+                    msakLocalServerHost: nil,
+                    msakLocalServerSecure: false
+                )
+                let tServers = try await lm.locateThroughputServers(limitToSiteOf: nil)
+                guard let chosen = tServers.first else {
+                    appendLog("Locate (throughput): no throughput servers returned")
+                    return
+                }
+                // Prefer download URL; fall back to upload
+                let urls = chosen.urls
+                var wsUrl: String? = nil
+                if let u = urls["ws:///throughput/v1/download"] as? String { wsUrl = u }
+                if wsUrl == nil, let u = urls["ws:///throughput/v1/upload"] as? String { wsUrl = u }
+                guard let ws = wsUrl, let comps = URLComponents(string: ws) else {
+                    appendLog("Locate (throughput): missing or invalid throughput URL in server response")
+                    return
+                }
+                let h = comps.host ?? ""
+                let scheme = (comps.scheme ?? "").lowercased()
+                let defaultPort = (scheme == "wss" || scheme == "https") ? 443 : 80
+                let p = comps.port ?? defaultPort
+                let tls = (scheme == "wss" || scheme == "https")
+
+                // Update UI fields
+                await MainActor.run {
+                    // Prevent onChange handlers from discarding the located Server while we populate fields.
+                    self.suppressLocateUpdateSideEffects = true
+                    self.host = "\(h):\(p)"
+                    self.useTLS = tls
+                    self.currentServer = chosen
+                    self.serverSource = .located
+                    self.suppressLocateUpdateSideEffects = false
+                    self.appendLog("Server set from Locate (throughput) → host=\(h) port=\(p) tls=\(tls)")
+                }
+                appendLog("Locate (throughput): selected \(chosen.machine) → host=\(h) port=\(p) tls=\(tls)")
+                appendLog("You can now run Download/Upload/Latency against this server")
+            } catch {
+                appendLog("Locate (throughput) error: \(error.localizedDescription)")
+            }
+        }
     }
 
     // MARK: - Actions
@@ -164,15 +370,19 @@ struct ContentView: View {
 
         // Build Server using ServerFactory (http). If you require HTTPS, update ServerFactory in shared code.
         // Kotlin 'object' maps to a Swift type with a `shared` singleton.
-        let server = buildLatencyServer()
+        let server = activeServer()
+        if serverSource == .located {
+            appendLog("Latency: using located server URLs (with access_token)")
+        }
+        appendLog("Latency: server=\(server.machine)")
 
         // Build config
         //MsakShared.QuickTests.shared.latencyProbe
           
         let cfg = LatencyConfig(
             server: server,
-            measurementId: "ios-demo",
-            udpPort: 1053,
+            measurementId: "ios-demo1",
+            udpPort: Int32(1053),
             duration: dur,
             userAgent: "msak-ios-tester/0.2"
         )
@@ -206,7 +416,11 @@ struct ContentView: View {
         let delay = Int64(tpDelayMs.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
 
         // Build Server using ServerFactory (ws). If you require WSS, update ServerFactory in shared code.
-        let server = buildThroughputServer()
+        let server = activeServer()
+        if serverSource == .located {
+            appendLog("Throughput \(direction.name): using located server URLs (with access_token)")
+        }
+        appendLog("Throughput \(direction.name): server=\(server.machine)")
 
         // Build config
         let cfg = ThroughputConfig(

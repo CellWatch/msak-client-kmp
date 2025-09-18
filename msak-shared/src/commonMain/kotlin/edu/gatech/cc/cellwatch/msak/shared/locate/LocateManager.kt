@@ -1,179 +1,145 @@
-//package edu.gatech.cc.cellwatch.msak.shared.locate
-//
-//
-//import com.google.gson.Gson
-//import com.google.gson.JsonSyntaxException
-//import edu.gatech.cc.cellwatch.msak.LATENCY_AUTHORIZE_PATH
-//import edu.gatech.cc.cellwatch.msak.LATENCY_RESULT_PATH
-//import edu.gatech.cc.cellwatch.msak.LOCATE_LATENCY_PATH
-//import edu.gatech.cc.cellwatch.msak.LOCATE_THROUGHPUT_PATH
-//import edu.gatech.cc.cellwatch.msak.Log
-//import edu.gatech.cc.cellwatch.msak.Server
-//import edu.gatech.cc.cellwatch.msak.ServerLocation
-//import edu.gatech.cc.cellwatch.msak.THROUGHPUT_DOWNLOAD_PATH
-//import edu.gatech.cc.cellwatch.msak.THROUGHPUT_UPLOAD_PATH
-//import okhttp3.Call
-//import okhttp3.Callback
-//import okhttp3.OkHttpClient
-//import okhttp3.Request
-//import okhttp3.Response
-//import java.io.IOException
-//import java.security.InvalidParameterException
-//import java.util.UUID
-//import kotlin.coroutines.resume
-//import kotlin.coroutines.resumeWithException
-//import kotlin.coroutines.suspendCoroutine
-//
-///**
-// * Class to interface with M-Lab's Locate API.
-// *
-// * @param client An OkHttpClient to use for HTTP requests. If not provided, a new one will be
-// *               created.
-// * @param serverEnv The M-Lab environment to use.
-// * @param locateUrl A custom locate base URL to use rather than the default based on serverEnv.
-// * @param userAgent The value of the User-Agent header to use for HTTP requests.
-// * @param msakLocalServerHost The host portion of the URL to use when running MSAK locally. Only
-// *                            used if serverEnv is LOCAL.
-// * @param msakLocalServerSecure Whether the local MSAK server is using HTTPS or not. Only used if
-// *                              serverEnv is LOCAL.
-// */
-//class LocateManager(
-//    client: OkHttpClient? = null,
-//    private val serverEnv: ServerEnv = ServerEnv.PROD,
-//    locateUrl: String? = null,
-//    private val userAgent: String? = null,
-//    private val msakLocalServerHost: String? = null,
-//    private val msakLocalServerSecure: Boolean = false,
-//) {
-//    private val TAG = this::class.simpleName
-//    private val locateUrls = mapOf(
-//        ServerEnv.PROD to "https://locate.measurementlab.net/v2/nearest/",
-//        ServerEnv.STAGING to "https://locate-dot-mlab-staging.appspot.com/v2/nearest/"
-//    )
-//    private val client = client ?: OkHttpClient.Builder().build()
-//
-//    /**
-//     * The base URL used for locate requests.
-//     */
-//    val locateUrl: String = locateUrl ?: locateUrls[serverEnv] ?: ""
-//
-//    init {
-//        if (serverEnv == ServerEnv.LOCAL && msakLocalServerHost == null) {
-//            throw InvalidParameterException("must provide msak local server host if server env is local")
-//        }
-//    }
-//
-//    /**
-//     * Request available MSAK throughput servers from the Locate API.
-//     *
-//     * @param server An optional server that, if provided, will be used to limit the results to only
-//     *               servers at the same site.
-//     */
-//    suspend fun locateThroughputServers(server: Server? = null): List<Server> {
-//        return locateServers("throughput", server)
-//    }
-//
-//
-//    /**
-//     * Request available MSAK latency servers from the Locate API.
-//     *
-//     * @param server An optional server that, if provided, will be used to limit the results to only
-//     *               servers at the same site.
-//     */
-//    suspend fun locateLatencyServers(server: Server? = null): List<Server> {
-//        return locateServers("latency", server)
-//    }
-//
-//    private suspend fun locateServers(
-//        test: String,
-//        server: Server? = null,
-//    ): List<Server> {
-//        val locatePath = when (test) {
-//            "throughput" -> LOCATE_THROUGHPUT_PATH
-//            "latency" -> LOCATE_LATENCY_PATH
-//            else -> throw InvalidParameterException("unknown test type $test")
-//        }
-//
-//        // No locate URL for the given environment means we should use the local MSAK server.
-//        if (serverEnv == ServerEnv.LOCAL) {
-//            if (msakLocalServerHost == null) {
-//                throw RuntimeException("missing msak local server host for local env")
-//            }
-//
-//            val measurementId = UUID.randomUUID().toString()
-//
-//            val urls = when (test) {
-//                "throughput" -> {
-//                    val proto = "ws${if (msakLocalServerSecure) { "s" } else { "" }}"
-//                    mapOf(
-//                        "$proto:///$THROUGHPUT_DOWNLOAD_PATH" to "$proto://$msakLocalServerHost/$THROUGHPUT_DOWNLOAD_PATH?mid=$measurementId",
-//                        "$proto:///$THROUGHPUT_UPLOAD_PATH" to "$proto://$msakLocalServerHost/$THROUGHPUT_UPLOAD_PATH?mid=$measurementId",
-//                    )
-//                }
-//                "latency" -> {
-//                    val proto = "http${if (msakLocalServerSecure) { "s" } else { "" }}"
-//                    mapOf(
-//                        "$proto:///$LATENCY_AUTHORIZE_PATH" to "$proto://$msakLocalServerHost/$LATENCY_AUTHORIZE_PATH?mid=$measurementId",
-//                        "$proto:///$LATENCY_RESULT_PATH" to "$proto://$msakLocalServerHost/$LATENCY_RESULT_PATH?mid=$measurementId",
-//                    )
-//                }
-//                else -> throw InvalidParameterException("unknown test type $test")
-//            }
-//
-//            return listOf(Server(msakLocalServerHost, null, urls))
-//        }
-//
-//        // The site name is embedded in the server's machine (hostname), formatted as
-//        // "mlab<number>-<site>.<rest of hostname>".
-//        val site = if (server != null) {
-//            Regex("([^-.]+)\\.").find(server.machine)?.groupValues?.get(1) ?: throw Exception("not site found in machine ${server.machine}")
-//        } else {
-//            null
-//        }
-//
-//        return requestServers("$locateUrl$locatePath", site)
-//    }
-//
-//    private suspend fun requestServers(
-//        fullLocateUrl: String,
-//        site: String? = null,
-//    ): List<Server> = suspendCoroutine { continuation ->
-//        val params = if (site != null) "site=$site" else ""
-//        val builder = Request.Builder().url("$fullLocateUrl?$params")
-//        if (userAgent != null) {
-//            builder.header("User-Agent", userAgent)
-//        }
-//        val request = builder.build()
-//
-//        client.newCall(request).enqueue(object : Callback {
-//            override fun onFailure(call: Call, e: IOException) {
-//                Log.i(TAG, "locate request failure: $call", e)
-//                continuation.resumeWithException(e)
-//            }
-//
-//            override fun onResponse(call: Call, response: Response) {
-//                val body = response.body
-//                if (response.code != 200 || body == null) {
-//                    Log.i(TAG, "locate request $request failed: $response")
-//                    continuation.resumeWithException(Exception("locate request $request failed: $response"))
-//                    return
-//                }
-//
-//                val results = try {
-//                    Gson().fromJson(body.charStream(), LocateResponse::class.java).results
-//                } catch (e: JsonSyntaxException) {
-//                    Log.e(TAG, "locate response deserialization failed: $body", e)
-//                    continuation.resumeWithException(e)
-//                    return
-//                }
-//
-//                continuation.resume(results)
-//            }
-//        })
-//    }
-//
-//    /**
-//     * The M-Lab server environment.
-//     */
-//    enum class ServerEnv {PROD, STAGING, LOCAL}
-//}
+package edu.gatech.cc.cellwatch.msak.shared.locate
+
+import edu.gatech.cc.cellwatch.msak.shared.LATENCY_AUTHORIZE_PATH
+import edu.gatech.cc.cellwatch.msak.shared.LATENCY_RESULT_PATH
+import edu.gatech.cc.cellwatch.msak.shared.LOCATE_LATENCY_PATH
+import edu.gatech.cc.cellwatch.msak.shared.LOCATE_THROUGHPUT_PATH
+import edu.gatech.cc.cellwatch.msak.shared.Log
+import edu.gatech.cc.cellwatch.msak.shared.Server
+import edu.gatech.cc.cellwatch.msak.shared.THROUGHPUT_DOWNLOAD_PATH
+import edu.gatech.cc.cellwatch.msak.shared.THROUGHPUT_UPLOAD_PATH
+import edu.gatech.cc.cellwatch.msak.shared.net.NetHttp
+import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.URLBuilder
+import io.ktor.http.isSuccess
+import io.ktor.http.path
+import kotlinx.serialization.json.Json
+import kotlin.random.Random
+
+/**
+ * Cross‑platform Locate manager for discovering MSAK servers.
+ *
+ * This version is KMP‑friendly: no OkHttp or Gson; uses shared KMP HTTP and kotlinx.serialization.
+ */
+class LocateManager(
+    private val serverEnv: ServerEnv = ServerEnv.PROD,
+    locateBaseUrl: String? = null,
+    private val userAgent: String? = null,
+    private val msakLocalServerHost: String? = null,
+    private val msakLocalServerSecure: Boolean = false,
+) {
+    private val TAG = this::class.simpleName ?: "LocateManager"
+
+    private val locateUrls = mapOf(
+        ServerEnv.PROD to "https://locate.measurementlab.net/v2/nearest/",
+        ServerEnv.STAGING to "https://locate-dot-mlab-staging.appspot.com/v2/nearest/",
+    )
+
+    /** The base URL used for locate requests. */
+    val locateUrl: String = locateBaseUrl ?: locateUrls[serverEnv] ?: ""
+
+    init {
+        if (serverEnv == ServerEnv.LOCAL && msakLocalServerHost == null) {
+            throw IllegalArgumentException("must provide msak local server host if server env is local")
+        }
+    }
+
+    /** Request available MSAK throughput servers from the Locate API. */
+    suspend fun locateThroughputServers(limitToSiteOf: Server? = null): List<Server> =
+        locateServers("throughput", limitToSiteOf)
+
+    /** Request available MSAK latency servers from the Locate API. */
+    suspend fun locateLatencyServers(limitToSiteOf: Server? = null): List<Server> =
+        locateServers("latency", limitToSiteOf)
+
+    private suspend fun locateServers(
+        test: String,
+        limitToSiteOf: Server? = null,
+    ): List<Server> {
+        val locatePath = when (test) {
+            "throughput" -> LOCATE_THROUGHPUT_PATH
+            "latency" -> LOCATE_LATENCY_PATH
+            else -> throw IllegalArgumentException("unknown test type $test")
+        }
+
+        // Local developer server shortcut; build URLs directly without calling Locate.
+        if (serverEnv == ServerEnv.LOCAL) {
+            val host = msakLocalServerHost ?: error("missing msak local server host for local env")
+            val mid = newMeasurementId()
+            val urls = when (test) {
+                "throughput" -> {
+                    val proto = if (msakLocalServerSecure) "wss" else "ws"
+                    mapOf(
+                        "$proto:///$THROUGHPUT_DOWNLOAD_PATH" to "$proto://$host/$THROUGHPUT_DOWNLOAD_PATH?mid=$mid",
+                        "$proto:///$THROUGHPUT_UPLOAD_PATH"   to "$proto://$host/$THROUGHPUT_UPLOAD_PATH?mid=$mid",
+                    )
+                }
+                "latency" -> {
+                    val proto = if (msakLocalServerSecure) "https" else "http"
+                    mapOf(
+                        "$proto:///$LATENCY_AUTHORIZE_PATH" to "$proto://$host/$LATENCY_AUTHORIZE_PATH?mid=$mid",
+                        "$proto:///$LATENCY_RESULT_PATH"    to "$proto://$host/$LATENCY_RESULT_PATH?mid=$mid",
+                    )
+                }
+                else -> emptyMap()
+            }
+            return listOf(Server(machine = host, location = null, urls = urls))
+        }
+
+        // If a Server is provided, limit results to its site (extracted from hostname).
+        val site: String? = limitToSiteOf?.let { srv ->
+            // Expected format: mlab<number>-<site>.<rest>; fall back to null if no match
+            Regex("mlab\\d+-([^.\\-]+)\\.").find(srv.machine)?.groupValues?.getOrNull(1)
+        }
+
+        val fullLocateUrl = URLBuilder("$locateUrl$locatePath").apply {
+            if (!site.isNullOrBlank()) parameters.append("site", site)
+        }.buildString()
+
+        val client = NetHttp.client
+        val resp = try {
+            client.get(fullLocateUrl) {
+                if (!userAgent.isNullOrBlank()) header("User-Agent", userAgent)
+            }
+        } catch (t: Throwable) {
+            Log.i(TAG, "locate request failure: $fullLocateUrl", t)
+            throw t
+        }
+        if (!resp.status.isSuccess()) {
+            Log.i(TAG, "locate request failed: status=${resp.status} url=$fullLocateUrl")
+            throw IllegalStateException("locate failed: ${resp.status}")
+        }
+
+        val body = resp.bodyAsText()
+        return try {
+            // Tolerant JSON: server may add fields
+            val json = Json { ignoreUnknownKeys = true; isLenient = true; explicitNulls = false }
+            json.decodeFromString<LocateResponse>(body).results
+        } catch (t: Throwable) {
+            Log.e(TAG, "locate response deserialization failed; body=${body.take(200)}", t)
+            throw t
+        }
+    }
+
+    /** The M-Lab server environment. */
+    enum class ServerEnv { PROD, STAGING, LOCAL }
+}
+
+private fun newMeasurementId(): String {
+    val bytes = ByteArray(16)
+    Random.nextBytes(bytes)
+    // Set version (4) and variant (RFC 4122)
+    bytes[6] = (bytes[6].toInt() and 0x0F or 0x40).toByte() // version 4
+    bytes[8] = (bytes[8].toInt() and 0x3F or 0x80).toByte() // variant 2
+    fun Byte.toHex() = (this.toInt() and 0xFF).toString(16).padStart(2, '0')
+    val hex = bytes.joinToString("") { it.toHex() }
+    return buildString(36) {
+        append(hex, 0, 8); append('-')
+        append(hex, 8, 12); append('-')
+        append(hex, 12, 16); append('-')
+        append(hex, 16, 20); append('-')
+        append(hex, 20, 32)
+    }
+}

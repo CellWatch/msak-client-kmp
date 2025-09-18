@@ -24,6 +24,8 @@ import kotlinx.serialization.json.Json
 import kotlin.random.Random
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import io.ktor.http.URLBuilder
+import io.ktor.http.Url
 
 /**
  * A single TCP stream used to measure throughput.
@@ -33,8 +35,7 @@ import kotlinx.coroutines.delay
  * @param direction The direction of the throughput test.
  * @param minMessageSize The initial size of data messages sent during an upload test.
  * @param maxMessageSize The maximum size of data messages sent during an upload test.
- * @param minMessageSize The threshold for increasing the size of data messages sent during an
- *                       upload test.
+ * @param messageScalingFraction The denominator used to decide when to scale the upload message size (higher = slower growth).
  * @param queueFullDelayMillis How many milliseconds to wait before sending more data when the
  *                             WebSocket's queue grows large during an upload test.
  * @param avgMeasurementIntervalMillis The average time between measurement sampling.
@@ -57,6 +58,7 @@ class ThroughputStream(
     minMeasurementIntervalMillis: Long = THROUGHPUT_MIN_MEASUREMENT_INTERVAL_MILLIS,
     private val userAgent: String? = null,
     private val wsFactory: WebSocketFactory,
+    private val streamsHint: Int? = null,
 ) {
     private val logTAG = "${this::class.simpleName} #$id"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -103,16 +105,36 @@ class ThroughputStream(
 
     fun start() {
         check(started.compareAndSet(false, true)) { "already started" }
+        Log.d(logTAG, "Starting throughput stream: direction=${direction}, url=${url}")
 
         val headers = mutableMapOf("Sec-WebSocket-Protocol" to THROUGHPUT_WS_PROTO)
         userAgent?.let { headers["User-Agent"] = it }
 
         startTime = Clock.System.now()
 
+        // Build per-stream URL: always set ?streams=<N>&index=<id>, warn if overriding existing.
+        val finalUrl = try {
+            val builder = URLBuilder(url)
+            val params = builder.parameters
+            if (params["streams"] != null) {
+                Log.w(logTAG, "Overriding existing streams=${params["streams"]} with ${streamsHint ?: 1}")
+            }
+            if (params["index"] != null) {
+                Log.w(logTAG, "Overriding existing index=${params["index"]} with $id")
+            }
+            params.set("streams", (streamsHint ?: 1).toString())
+            params.set("index", id.toString())
+            builder.buildString()
+        } catch (t: Throwable) {
+            Log.w(logTAG, "failed to build per-stream URL from '$url'", t)
+            url // fall back to original
+        }
+
         // Connect and manage the socket using the per-stream scope.
         scope.launch {
             try {
-                val socket = wsFactory.connect(url = url, headers = headers)
+                Log.d(logTAG, "Connecting WebSocket to ${finalUrl}")
+                val socket = wsFactory.connect(url = finalUrl, headers = headers)
                 ws = socket
                 Log.v(logTAG, "WebSocket open")
 
@@ -153,12 +175,12 @@ class ThroughputStream(
                     finish(null)
                 } catch (t: Throwable) {
                     // Receiving failed. Mark as failure.
-                    Log.d(logTAG, "websocket receive loop failed", t)
+                    Log.d(logTAG, "websocket receive loop failed for ${finalUrl}", t)
                     finish(FailureException())
                 }
             } catch (t: Throwable) {
                 // Connect failed or other setup error.
-                Log.d(logTAG, "websocket connect failed", t)
+                Log.d(logTAG, "websocket connect failed for ${finalUrl}", t)
                 finish(FailureException())
             }
         }
@@ -187,7 +209,7 @@ class ThroughputStream(
             netBytesReceived?.let { recv -> ByteCounters(sent, recv) }
         }
         val m = ThroughputMeasurement(net, app, (end - start).inWholeMilliseconds)
-        Log.v(logTAG, "sending measurement: $m")
+        Log.v(logTAG, "sending measurement (stream=${id}): $m")
         val socket = ws ?: return
         val ok = runCatching {
             socket.sendText(THROUGHPUT_JSON.encodeToString(ThroughputMeasurement.serializer(), m))
@@ -219,11 +241,14 @@ class ThroughputStream(
 
             // Crude back-pressure and scaling
             if (size < maxMessageSize &&
-                size < (appBytesSent.value / messageScalingFraction.toDouble())
+                size.toDouble() < (appBytesSent.value / messageScalingFraction.toDouble())
             ) {
-                size = size shl 1
-                payload = Random.nextBytes(size)
-                Log.d(logTAG, "scaled message size to $size bytes")
+                val newSize = (size shl 1).coerceAtMost(maxMessageSize)
+                if (newSize != size) {
+                    size = newSize
+                    payload = Random.nextBytes(size)
+                    Log.d(logTAG, "scaled message size to $size bytes")
+                }
             } else {
                 // simple pacing similar to queueFullDelayMillis path
                 delay(queueFullDelayMillis)
@@ -239,6 +264,7 @@ class ThroughputStream(
 
     private fun finish(err: Throwable? = null) {
         if (ended) return
+        Log.d(logTAG, "finishing stream (err=${err?.let { it::class.simpleName } ?: "none"})")
         endTime = Clock.System.now()
         ticker.stop()
         error = err

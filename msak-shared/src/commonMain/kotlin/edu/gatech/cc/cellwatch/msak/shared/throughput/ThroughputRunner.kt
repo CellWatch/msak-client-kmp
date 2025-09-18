@@ -52,7 +52,7 @@ data class ThroughputSummary(
         }
         return "Throughput $d OK | bytes=$appBytesTotal app Mbits=${fmt2(mbits)} Mbps=${fmt2(mbps)} " +
                 "updates client=$clientUpdates server=$serverUpdates " +
-                "[client=${clientUpdates}/${fmt2(clientBytes / 1_000_000.0)}M server=${fmt2(serverBytes / 1_000_000.0)}M]"
+                "[client=${clientUpdates}/${fmt2(clientBytes / 1_000_000.0)}M server=${serverUpdates}/${fmt2(serverBytes / 1_000_000.0)}M]"
     }
 }
 
@@ -85,7 +85,12 @@ suspend fun runThroughput(config: ThroughputConfig): ThroughputSummary {
             withTimeoutOrNull(config.durationMs.milliseconds + 3.seconds) {
                 for (u in test.updatesChan) {
                     val app = u.measurement.Application
-                    val s = u.stream.coerceIn(0, config.streams - 1)
+                    val s = u.stream
+                    if (s !in 0 until config.streams) {
+                        // Ignore out-of-range stream indices from server/client; they shouldn't happen,
+                        // but guarding avoids attributing bytes to the wrong stream.
+                        continue
+                    }
                     if (u.fromServer) {
                         val cum = when (config.direction) {
                             ThroughputDirection.DOWNLOAD -> app.BytesSent
