@@ -32,7 +32,7 @@
             android:ems="10"
             android:inputType="text" />
         <Button
-            android:id="@+id/btnLocate"
+            android:id="@+id/btnLocateLatency"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:minWidth="0dp"
@@ -40,8 +40,20 @@
             android:paddingHorizontal="8dp"
             android:paddingVertical="4dp"
             android:layout_marginStart="8dp"
-            android:text="📍"
-            android:contentDescription="Locate nearest server" />
+            android:text="📍L"
+            android:contentDescription="Locate nearest latency server" />
+
+        <Button
+            android:id="@+id/btnLocateThroughput"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingHorizontal="8dp"
+            android:paddingVertical="4dp"
+            android:layout_marginStart="8dp"
+            android:text="📍T"
+            android:contentDescription="Locate nearest throughput server" />
     </LinearLayout>
 
     <LinearLayout

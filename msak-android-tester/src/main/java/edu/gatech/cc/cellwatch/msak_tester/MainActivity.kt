@@ -9,6 +9,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
+import edu.gatech.cc.cellwatch.msak.shared.Server
 import edu.gatech.cc.cellwatch.msak.shared.ServerFactory
 import edu.gatech.cc.cellwatch.msak.shared.latency.LatencyConfig
 import edu.gatech.cc.cellwatch.msak.shared.latency.runLatency
@@ -25,6 +26,10 @@ import kotlinx.coroutines.launch
 class MainActivity : AppCompatActivity() {
     private val TAG = this::class.simpleName
     private lateinit var binding: ActivityMainBinding
+
+    private var currentServer: Server? = null
+    private enum class ServerSource { LOCAL, LOCATED }
+    private var serverSource: ServerSource = ServerSource.LOCAL
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,8 +67,9 @@ class MainActivity : AppCompatActivity() {
         binding.btnDownload.setOnClickListener { wrapTestRun { testThroughput(ThroughputDirection.DOWNLOAD) } }
         binding.btnUpload.setOnClickListener { wrapTestRun { testThroughput(ThroughputDirection.UPLOAD) } }
 
-        // locate button
-        binding.btnLocate.setOnClickListener { wrapTestRun { locateAndPopulate() } }
+        // locate buttons (parity with iOS: 📍L and 📍T)
+        binding.btnLocateLatency.setOnClickListener { wrapTestRun { locateLatencyAndPopulate() } }
+        binding.btnLocateThroughput.setOnClickListener { wrapTestRun { locateThroughputAndPopulate() } }
 
         // setup output view
         binding.output.movementMethod = ScrollingMovementMethod()
@@ -81,6 +87,8 @@ class MainActivity : AppCompatActivity() {
         binding.btnLatency.isEnabled = enabled
         binding.btnDownload.isEnabled = enabled
         binding.btnUpload.isEnabled = enabled
+        binding.btnLocateLatency.isEnabled = enabled
+        binding.btnLocateThroughput.isEnabled = enabled
     }
 
     fun printHeader(text: String) {
@@ -96,11 +104,25 @@ class MainActivity : AppCompatActivity() {
         binding.output.append("$text\n")
     }
 
-    /** Demonstrates building a LatencyConfig and calling the shared API. */
+    private fun printInfo(text: String) = printMsg(text)
+
+    /** Demonstrates building a LatencyConfig and calling the shared API (unified server). */
     private suspend fun testLatency() {
         printHeader("Latency test")
-        val cfg = buildLatencyConfig()
-        printMsg("Config → host=${cfg.server.machine} udpPort=${cfg.udpPort} durationMs=${cfg.duration} tls=${binding.localSecure.isChecked}")
+        val server = activeServer()
+        // NOTE: located servers carry access_token URLs; we don't rewrite them.
+        if (serverSource == ServerSource.LOCATED) {
+            printInfo("Latency: using located server URLs (with access_token)")
+        }
+        printInfo("Latency: server=${server.machine}")
+
+        val durationMs = binding.latDuration.text.toString().toLongOrNull() ?: 3000L
+        val cfg = LatencyConfig(
+            server = server,
+            measurementId = "android-demo",
+            duration = durationMs,
+            userAgent = USER_AGENT
+        )
         try {
             val summary = runLatency(cfg)
             printMsg("Result → ${summary.asText()}")
@@ -110,11 +132,28 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Demonstrates building a ThroughputConfig and calling the shared API. */
+    /** Demonstrates building a ThroughputConfig and calling the shared API (unified server). */
     private suspend fun testThroughput(dir: ThroughputDirection) {
         printHeader("Throughput ${dir.name.lowercase()} test")
-        val cfg = buildThroughputConfig(dir)
-        printMsg("Config → host=${cfg.server.machine} streams=${cfg.streams} durationMs=${cfg.durationMs} delayMs=${cfg.delayMs} tls=${binding.localSecure.isChecked}")
+        val server = activeServer()
+        if (serverSource == ServerSource.LOCATED) {
+            printInfo("Throughput ${dir.name}: using located server URLs (with access_token)")
+        }
+        printInfo("Throughput ${dir.name}: server=${server.machine}")
+
+        val streams = binding.tputStreams.text.toString().toIntOrNull() ?: 2
+        val durationMs = binding.tputDuration.text.toString().toLongOrNull() ?: 5000L
+        val delayMs = binding.tputDelay.text.toString().toLongOrNull() ?: 0L
+
+        val cfg = ThroughputConfig(
+            server = server,
+            direction = dir,
+            streams = streams,
+            durationMs = durationMs,
+            delayMs = delayMs,
+            measurementId = "android-demo",
+            userAgent = USER_AGENT
+        )
         try {
             val summary = runThroughput(cfg)
             printMsg("Result → ${summary.asText()}")
@@ -134,38 +173,49 @@ class MainActivity : AppCompatActivity() {
         return host to port
     }
 
-    /** Build a LatencyConfig from current UI fields to demonstrate the API. */
-    private fun buildLatencyConfig(): LatencyConfig {
-        val (hostPort, secure) = readServerFromUi()
-        val (host, httpPort) = normalizeHostPort(hostPort)
-        val server = ServerFactory.forLatency(host = host, httpPort = httpPort, useTls = secure)
-        val durationMs = binding.latDuration.text.toString().toLongOrNull() ?: 3000L
-        return LatencyConfig(
-            server = server,
-            measurementId = "android-demo",
-            udpPort = 1053,
-            duration = durationMs,
-            userAgent = USER_AGENT
-        )
+    /** Split "host[:port]" where port is optional and numeric. */
+    private fun splitHostPort(value: String): Pair<String, Int?> {
+        val trimmed = value.trim()
+        if (trimmed.isEmpty()) return "127.0.0.1" to null
+        val idx = trimmed.lastIndexOf(':')
+        if (idx > 0) {
+            val maybePort = trimmed.substring(idx + 1)
+            val p = maybePort.toIntOrNull()
+            if (p != null) return trimmed.substring(0, idx) to p
+        }
+        return trimmed to null
     }
 
-    /** Build a ThroughputConfig from current UI fields to demonstrate the API. */
-    private fun buildThroughputConfig(dir: ThroughputDirection): ThroughputConfig {
-        val (hostPort, secure) = readServerFromUi()
-        val (host, wsPort) = normalizeHostPort(hostPort)
-        val server = ServerFactory.forThroughput(host = host, wsPort = wsPort, useTls = secure)
-        val streams = binding.tputStreams.text.toString().toIntOrNull() ?: 2
-        val durationMs = binding.tputDuration.text.toString().toLongOrNull() ?: 5000L
-        val delayMs = binding.tputDelay.text.toString().toLongOrNull() ?: 0L
-        return ThroughputConfig(
-            server = server,
-            direction = dir,
-            streams = streams,
-            durationMs = durationMs,
-            delayMs = delayMs,
+    /** Build/refresh a local Server using unified ServerFactory, honoring useTLS and UI host:port. */
+    private fun rebuildLocalServerFromFields() {
+        val (rawHostPort, secure) = readServerFromUi()
+        val (hostOnly, portOpt) = splitHostPort(rawHostPort)
+        val defaultPort = if (secure) 443 else 8080
+        val port = portOpt ?: defaultPort
+        val server = ServerFactory.buildServer(
+            host = hostOnly,
+            port = port,
+            useTls = secure,
+            includeLatency = true,
+            includeThroughput = true,
             measurementId = "android-demo",
-            userAgent = USER_AGENT
+            latencyPathPrefix = "/latency/v1",
+            throughputPathPrefix = "/throughput/v1",
+            latencyUdpPort = 1053
         )
+        currentServer = server
+        serverSource = ServerSource.LOCAL
+        printInfo("Server built (local): host=$hostOnly port=$port tls=$secure")
+    }
+
+    /** Choose the active server: prefer located; else build/return local. */
+    private fun activeServer(): Server {
+        currentServer?.let {
+            printInfo("Using existing server (${if (serverSource == ServerSource.LOCATED) "located" else "local"}) → ${it.machine}")
+            return it
+        }
+        rebuildLocalServerFromFields()
+        return currentServer!!
     }
 
     /** Read host:port and secure flag from UI. */
@@ -175,31 +225,65 @@ class MainActivity : AppCompatActivity() {
         return hostPort to secure
     }
 
-    /** Use Locate API to find a public server, update UI host/secure accordingly, and print selection. */
-    private suspend fun locateAndPopulate() {
-        printHeader("Locate")
+    /** Locate latency server and populate host/TLS; keep located Server verbatim. */
+    private suspend fun locateLatencyAndPopulate() {
+        printHeader("Locate (latency)")
         try {
             val lm = LocateManager(LocateManager.ServerEnv.PROD, userAgent = USER_AGENT)
-            // Prefer throughput WS for populating host/port + TLS
-            val tServers = lm.locateThroughputServers()
-            val chosen = tServers.firstOrNull() ?: run {
-                printError("No throughput servers returned")
+            val lServers = lm.locateLatencyServers()
+            val chosen = lServers.firstOrNull()
+            if (chosen == null) {
+                printError("Locate (latency): no latency servers returned")
                 return
             }
-            val wsDownload = chosen.urls["ws:///throughput/v1/download"]
-                ?: chosen.urls["ws:///throughput/v1/upload"]
-                ?: run {
-                    printError("Located server missing throughput URLs")
-                    return
-                }
-            val (host, port, secure) = parseHostPortSecure(wsDownload)
-            // Apply to UI so subsequent tests use this endpoint
-            binding.localHost.setText("$host:$port")
-            binding.localSecure.isChecked = secure
-            printMsg("Located → ${chosen.machine} | ws=${wsDownload} → host=$host port=$port tls=$secure")
-            printMsg("You can now tap Download/Upload/Latency to run against this server")
+            val latencyUrl = chosen.urls["https:///latency/v1/authorize"]
+                ?: chosen.urls["http:///latency/v1/authorize"]
+            if (latencyUrl == null) {
+                printError("Locate (latency): missing latency authorize URL")
+                return
+            }
+            val (h, p, tls) = parseHostPortSecure(latencyUrl)
+            // Update UI and state
+            binding.localHost.setText("$h:$p")
+            binding.localSecure.isChecked = tls
+            currentServer = chosen
+            serverSource = ServerSource.LOCATED
+            printInfo("Server set from Locate (latency) → host=$h port=$p tls=$tls")
+            printInfo("Locate (latency): selected ${chosen.machine} → host=$h port=$p tls=$tls")
+            printInfo("You can now run Latency/Download/Upload against this server")
         } catch (t: Throwable) {
-            printError("Locate failed: ${t.message ?: t::class.simpleName ?: "unknown"}")
+            printError("Locate (latency) error: ${t.message ?: t::class.simpleName ?: "unknown"}")
+        }
+    }
+
+    /** Locate throughput server and populate host/TLS; keep located Server verbatim. */
+    private suspend fun locateThroughputAndPopulate() {
+        printHeader("Locate (throughput)")
+        try {
+            val lm = LocateManager(LocateManager.ServerEnv.PROD, userAgent = USER_AGENT)
+            val tServers = lm.locateThroughputServers()
+            val chosen = tServers.firstOrNull()
+            if (chosen == null) {
+                printError("Locate (throughput): no throughput servers returned")
+                return
+            }
+            val wsUrl = chosen.urls["ws:///throughput/v1/download"]
+                ?: chosen.urls["ws:///throughput/v1/upload"]
+            if (wsUrl == null) {
+                printError("Locate (throughput): missing throughput URL")
+                return
+            }
+            val (h, p, tls) = parseHostPortSecure(wsUrl)
+            // Update UI and state
+            binding.localHost.setText("$h:$p")
+            binding.localSecure.isChecked = tls
+            currentServer = chosen
+            serverSource = ServerSource.LOCATED
+            printInfo("Server set from Locate (throughput) → host=$h port=$p tls=$tls")
+            printInfo("Locate (throughput): selected ${chosen.machine} → host=$h port=$p tls=$tls")
+            printInfo("You can now run Download/Upload/Latency against this server")
+        } catch (t: Throwable) {
+            printError("Locate (throughput) error: ${t.message ?: t::class.simpleName ?: "unknown"}")
         }
     }
 
