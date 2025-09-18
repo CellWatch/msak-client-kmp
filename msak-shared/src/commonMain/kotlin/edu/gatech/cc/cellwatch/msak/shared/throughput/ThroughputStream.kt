@@ -130,6 +130,16 @@ class ThroughputStream(
             url // fall back to original
         }
 
+        // Defensive sanity: ensure scheme and host exist (avoid malformed ws:/// or accidental :80:8080, etc.)
+        runCatching {
+            val u = Url(finalUrl)
+            if (u.protocol.name !in listOf("ws", "wss") || u.host.isBlank()) {
+                Log.w(logTAG, "invalid websocket URL built: '$finalUrl' (protocol='${u.protocol.name}', host='${u.host}') — falling back to original '$url'")
+            }
+        }.onFailure {
+            Log.w(logTAG, "unable to parse finalUrl '$finalUrl'; falling back to original '$url'", it)
+        }
+
         // Connect and manage the socket using the per-stream scope.
         scope.launch {
             try {

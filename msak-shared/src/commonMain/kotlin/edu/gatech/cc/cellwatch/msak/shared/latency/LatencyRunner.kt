@@ -13,6 +13,10 @@ import kotlin.time.Duration.Companion.seconds
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.math.roundToLong
 
+import edu.gatech.cc.cellwatch.msak.shared.MsakException
+import edu.gatech.cc.cellwatch.msak.shared.MsakErrorCode
+import kotlin.coroutines.cancellation.CancellationException
+
 /**
  * Configuration for a latency measurement run.
  */
@@ -22,7 +26,40 @@ data class LatencyConfig(
     val udpPort: Int = 1053,
     val duration: Long = 3_000,
     val userAgent: String? = null,
-)
+) {
+    // Swift-friendly overloads: let Swift omit udpPort by delegating with udpPort=0 (auto-infer on Kotlin side)
+    constructor(
+        server: Server,
+        measurementId: String = "localtest",
+        duration: Long = 3_000,
+        userAgent: String? = null
+    ) : this(
+        server = server,
+        measurementId = measurementId,
+        udpPort = 0, // 0 = "let LatencyTest infer (1053 local / 6001 remote)"
+        duration = duration,
+        userAgent = userAgent
+    )
+
+    constructor(
+        server: Server,
+        duration: Long
+    ) : this(
+        server = server,
+        measurementId = "localtest",
+        udpPort = 0,
+        duration = duration,
+        userAgent = null
+    )
+
+    constructor(server: Server) : this(
+        server = server,
+        measurementId = "localtest",
+        udpPort = 0,
+        duration = 3_000,
+        userAgent = null
+    )
+}
 
 /**
  * Structured result of a latency run. Use [asText] for a compact one-line summary.
@@ -54,6 +91,8 @@ private fun fmt2(v: Double): String {
  * drains updates up to (duration + 3s) and then summarizes.
  * The caller owns any UI and logging.
  */
+@Suppress("RedundantThrows")
+@Throws(MsakException::class, CancellationException::class)
 suspend fun runLatency(config: LatencyConfig): LatencySummary {
     val test = LatencyTest(
         server = config.server,
@@ -72,8 +111,15 @@ suspend fun runLatency(config: LatencyConfig): LatencySummary {
             }
         }
 
-        test.error?.let { throw it }
-        val res = test.result ?: error("no result")
+        // Surface any recorded error, mapping to MsakException if needed
+        test.lastError?.let { err ->
+            when (err) {
+                is MsakException -> throw err
+                is CancellationException -> throw err
+                else -> throw MsakException(MsakErrorCode.UNKNOWN, "latency failed", err)
+            }
+        }
+        val res = test.result ?: throw MsakException(MsakErrorCode.UNKNOWN, "no latency result")
 
         val rtts = res.RoundTrips.mapNotNull { it.rttUs }
         val mean = rtts.takeIf { it.isNotEmpty() }?.average()?.div(1000.0)
@@ -112,6 +158,7 @@ fun latencyFlow(config: LatencyConfig): Flow<LatencyUpdate> = channelFlow {
     awaitClose {
         // Ensure the sender coroutine is cancelled when the collector stops.
         job.cancel()
+        // We don't throw from flows; the LatencyTest will have logged any errors.
         // If LatencyTest exposes an explicit stop, invoke it here as well.
         // e.g., test.stop()
     }

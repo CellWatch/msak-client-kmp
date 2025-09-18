@@ -211,7 +211,8 @@ struct ContentView: View {
             includeThroughput: true,
             measurementId: "ios-demo",
             latencyPathPrefix: "latency/v1",
-            throughputPathPrefix: "throughput/v1"
+            throughputPathPrefix: "throughput/v1",
+            latencyUdpPort: Int32(1053)
         )
         currentServer = srv
         serverSource = .local
@@ -234,7 +235,8 @@ struct ContentView: View {
             includeThroughput: true,
             measurementId: "ios-demo",
             latencyPathPrefix: "latency/v1",
-            throughputPathPrefix: "throughput/v1"
+            throughputPathPrefix: "throughput/v1",
+            latencyUdpPort: Int32(1053)
         )
         serverSource = .local
         currentServer = s
@@ -376,15 +378,12 @@ struct ContentView: View {
         }
         appendLog("Latency: server=\(server.machine)")
 
-        // Build config
-        //MsakShared.QuickTests.shared.latencyProbe
-          
+        // Build config — do NOT force the UDP port here; shared code will choose based on environment/host.
         let cfg = LatencyConfig(
             server: server,
-            measurementId: "ios-demo1",
-            udpPort: Int32(1053),
+            measurementId: "ios-demo",
             duration: dur,
-            userAgent: "msak-ios-tester/0.2"
+            userAgent: USER_AGENT
         )
 
         Task {
@@ -396,8 +395,9 @@ struct ContentView: View {
                 appendLog("Latency OK: \(text)")
                 latencyStatus = text
             } catch {
-                appendLog("Latency error: \(error.localizedDescription)")
-                latencyStatus = "Error"
+                let msg = (error as NSError).localizedDescription
+                appendLog("Latency error: \(msg)")
+                latencyStatus = "Error: \(msg)"
             }
         }
     }
@@ -445,15 +445,17 @@ struct ContentView: View {
                     throughputUploadStatus = text
                 }
             } catch {
-                appendLog("Throughput \(direction.name) error: \(error.localizedDescription)")
+                let msg = (error as NSError).localizedDescription
+                appendLog("Throughput \(direction.name) error: \(msg)")
                 if direction == .download {
-                    throughputDownloadStatus = "Error"
+                    throughputDownloadStatus = "Error: \(msg)"
                 } else {
-                    throughputUploadStatus = "Error"
+                    throughputUploadStatus = "Error: \(msg)"
                 }
             }
         }
     }
+
 }
 
 #Preview {

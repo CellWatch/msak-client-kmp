@@ -103,6 +103,7 @@ object ServerFactory {
         measurementId: String? = null,
         latencyPathPrefix: String = LAT_PATH_PREFIX,
         throughputPathPrefix: String = TPUT_PATH_PREFIX,
+        latencyUdpPort: Int = 1053,
     ): Server {
         val mid = measurementId ?: newMeasurementId()
         val schemeHttp = if (useTls) "https" else "http"
@@ -150,7 +151,7 @@ object ServerFactory {
             }
         }
 
-        return Server(machine = host, location = null, urls = urls)
+        return Server(machine = host, location = null, urls = urls, latencyUdpPort = latencyUdpPort)
     }
 
     // ----------------------------
@@ -169,7 +170,8 @@ object ServerFactory {
         latencyAuthorize: String? = null,
         latencyResult: String? = null,
         tputDownload: String? = null,
-        tputUpload: String? = null
+        tputUpload: String? = null,
+        latencyUdpPort: Int? = null
     ): Server {
         val host = listOfNotNull(latencyAuthorize, latencyResult, tputDownload, tputUpload)
             .firstNotNullOfOrNull { safeHost(it) } ?: ""
@@ -205,7 +207,7 @@ object ServerFactory {
             throw IllegalArgumentException("buildFromAbsolute: no URLs provided")
         }
 
-        return Server(machine = host, location = null, urls = urls)
+        return Server(machine = host, location = null, urls = urls, latencyUdpPort = latencyUdpPort)
     }
 
     // ----------------------------

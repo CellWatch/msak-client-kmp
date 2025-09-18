@@ -25,6 +25,7 @@ open class Server(
     val machine: String,
     val location: ServerLocation? = null,
     val urls: Map<String, String>,
+    val latencyUdpPort: Int? = null,
 ) {
 
     private fun missingUrlError(kind: String, path: String): IllegalStateException {
@@ -113,17 +114,18 @@ open class Server(
 
     override fun equals(other: Any?): Boolean {
         if (other !is Server) return false
-        return other.machine == machine && other.location == location && other.urls == urls
+        return other.machine == machine && other.location == location && other.urls == urls && other.latencyUdpPort == latencyUdpPort
     }
 
     override fun toString(): String {
-        return "${this::class.simpleName}(machine=$machine, location=$location, urls=$urls)"
+        return "${this::class.simpleName}(machine=$machine, location=$location, latencyUdpPort=$latencyUdpPort, urls=$urls)"
     }
 
     override fun hashCode(): Int {
         var result = machine.hashCode()
         result = 31 * result + (location?.hashCode() ?: 0)
         result = 31 * result + urls.hashCode()
+        result = 31 * result + (latencyUdpPort ?: 0)
         return result
     }
 }

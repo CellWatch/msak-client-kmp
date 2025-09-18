@@ -85,6 +85,8 @@ class LatencyTest(
     // Result / error after completion
     var result: LatencyResult? = null
     var error: Throwable? = null
+    /** Mirror ThroughputTest: expose the most recent error via a stable name. */
+    val lastError: Throwable? get() = error
 
     // Hostname resolved from the authorize URL
     val serverHost: String = Url(authorizeUrl).host
@@ -128,11 +130,13 @@ class LatencyTest(
         )
         Log.d(TAG, "got authorize response; Type=${auth.Type} ID=${auth.ID} Seq=${auth.Seq}")
 
-        // Open UDP socket to serverHost:latencyPort
+        // Open UDP socket to serverHost:resolvedLatencyPort
         val sock = SocketFactory.udp()
         activeSocket = sock
+        val resolvedPort = if (latencyPort > 0) latencyPort else (server.latencyUdpPort ?: 1053)
         try {
-            sock.connect(serverHost, latencyPort)
+            Log.d(TAG, "connecting UDP → host=$serverHost port=$resolvedPort")
+            sock.connect(serverHost, resolvedPort)
         } catch (t: Throwable) {
             Log.i(TAG, "UDP connect failed", t)
             throw InitialPacketTimeoutException()
@@ -249,6 +253,7 @@ class LatencyTest(
 
         startTime = Clock.System.now()
         var gotFirst = false
+        var firstReplyTimedOut = false
 
         // Retry-sender for the initial packet until first response
         val retryJob: Job = scope.launch {
@@ -266,7 +271,10 @@ class LatencyTest(
                 rem--
             }
             if (!gotFirst) {
-                Log.i(TAG, "no response to initial packet")
+                Log.i(TAG, "no response to initial packet; timing out")
+                firstReplyTimedOut = true
+                // Closing the socket will unblock any pending receive on native targets.
+                runCatching { sock.close() }
             }
         }
 
@@ -308,11 +316,15 @@ class LatencyTest(
 
                 // Check deadline
                 if (stopDeadline != null && now >= stopDeadline) {
+                    Log.d(TAG, "no server-driven end; finishing latency on client after duration window")
                     break
                 }
             }
         } finally {
             retryJob.cancel()
+        }
+        if (!gotFirst && firstReplyTimedOut) {
+            throw InitialPacketTimeoutException()
         }
     }
 

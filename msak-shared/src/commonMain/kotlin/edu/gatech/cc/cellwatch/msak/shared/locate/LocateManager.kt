@@ -105,11 +105,11 @@ class LocateManager(
             }
         } catch (t: Throwable) {
             Log.i(TAG, "locate request failure: $fullLocateUrl", t)
-            throw t
+            throw LocateNetworkException(fullLocateUrl, t)
         }
         if (!resp.status.isSuccess()) {
             Log.i(TAG, "locate request failed: status=${resp.status} url=$fullLocateUrl")
-            throw IllegalStateException("locate failed: ${resp.status}")
+            throw LocateHttpException(resp.status.value, fullLocateUrl)
         }
 
         val body = resp.bodyAsText()
@@ -119,13 +119,25 @@ class LocateManager(
             json.decodeFromString<LocateResponse>(body).results
         } catch (t: Throwable) {
             Log.e(TAG, "locate response deserialization failed; body=${body.take(200)}", t)
-            throw t
+            throw LocateDecodeException(fullLocateUrl, t)
         }
     }
 
     /** The M-Lab server environment. */
     enum class ServerEnv { PROD, STAGING, LOCAL }
 }
+
+/** Base class for locate‑related failures surfaced to callers. */
+open class LocateException(message: String, cause: Throwable? = null) : Exception(message, cause)
+
+/** Network I/O failure when calling the locate endpoint. */
+class LocateNetworkException(val url: String, cause: Throwable) : LocateException("locate network failure: $url", cause)
+
+/** Non‑2xx HTTP response from locate. */
+class LocateHttpException(val status: Int, val url: String) : LocateException("locate failed: HTTP $status for $url")
+
+/** Unable to parse locate response JSON. */
+class LocateDecodeException(val url: String, cause: Throwable) : LocateException("locate response parsing failed for $url", cause)
 
 private fun newMeasurementId(): String {
     val bytes = ByteArray(16)

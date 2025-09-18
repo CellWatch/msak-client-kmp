@@ -1,6 +1,8 @@
 package edu.gatech.cc.cellwatch.msak.shared.throughput
 
 import edu.gatech.cc.cellwatch.msak.shared.Server
+import edu.gatech.cc.cellwatch.msak.shared.MsakException
+import edu.gatech.cc.cellwatch.msak.shared.MsakErrorCode
 import kotlinx.datetime.Clock
 import kotlin.math.max
 import kotlin.math.roundToLong
@@ -8,9 +10,27 @@ import kotlin.math.roundToLong
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
+import io.ktor.util.network.UnresolvedAddressException
+import kotlin.coroutines.cancellation.CancellationException
+
+
+private fun mapThrowable(t: Throwable): MsakException = when (t) {
+    is io.ktor.http.URLParserException ->
+        MsakException(MsakErrorCode.INVALID_URL, "Invalid URL", t)
+    is kotlinx.serialization.SerializationException ->
+        MsakException(MsakErrorCode.BAD_JSON, "Bad JSON", t)
+    is kotlinx.coroutines.TimeoutCancellationException ->
+        MsakException(MsakErrorCode.TIMEOUT, "Timed out", t)
+    is UnresolvedAddressException ->
+        MsakException(MsakErrorCode.DNS, "DNS resolution failed", t)
+    is CancellationException ->
+        MsakException(MsakErrorCode.CANCELED, "Canceled", t)
+    else -> MsakException(MsakErrorCode.UNKNOWN, t.message ?: "Unknown error", t)
+}
 
 private fun fmt2(v: Double): String {
     val rounded = (v * 100.0).roundToLong() / 100.0
@@ -57,6 +77,8 @@ data class ThroughputSummary(
 }
 
 
+@Suppress("RedundantThrows")
+@Throws(MsakException::class, CancellationException::class)
 suspend fun runThroughput(config: ThroughputConfig): ThroughputSummary {
     val test = ThroughputTest(
         server = config.server,
@@ -82,39 +104,54 @@ suspend fun runThroughput(config: ThroughputConfig): ThroughputSummary {
         return withContext(Dispatchers.Default + SupervisorJob()) {
             test.start()
             // Drain updates until completion or timeout (duration + small grace)
-            withTimeoutOrNull(config.durationMs.milliseconds + 3.seconds) {
-                for (u in test.updatesChan) {
-                    val app = u.measurement.Application
-                    val s = u.stream
-                    if (s !in 0 until config.streams) {
-                        // Ignore out-of-range stream indices from server/client; they shouldn't happen,
-                        // but guarding avoids attributing bytes to the wrong stream.
-                        continue
-                    }
-                    if (u.fromServer) {
-                        val cum = when (config.direction) {
-                            ThroughputDirection.DOWNLOAD -> app.BytesSent
-                            ThroughputDirection.UPLOAD -> app.BytesReceived
+            try {
+                withTimeout(config.durationMs.milliseconds + 3.seconds) {
+                    for (u in test.updatesChan) {
+                        val app = u.measurement.Application
+                        val s = u.stream
+                        if (s !in 0 until config.streams) {
+                            // Ignore out-of-range stream indices from server/client; they shouldn't happen,
+                            // but guarding avoids attributing bytes to the wrong stream.
+                            continue
                         }
-                        val delta = (cum - lastServer[s]).coerceAtLeast(0)
-                        lastServer[s] = cum
-                        serverBytes += delta
-                        appBytesTotal += delta
-                        serverUpdates++
-                    } else {
-                        val cum = when (config.direction) {
-                            ThroughputDirection.DOWNLOAD -> app.BytesReceived
-                            ThroughputDirection.UPLOAD -> app.BytesSent
+                        if (u.fromServer) {
+                            val cum = when (config.direction) {
+                                ThroughputDirection.DOWNLOAD -> app.BytesSent
+                                ThroughputDirection.UPLOAD -> app.BytesReceived
+                            }
+                            val delta = (cum - lastServer[s]).coerceAtLeast(0)
+                            lastServer[s] = cum
+                            serverBytes += delta
+                            appBytesTotal += delta
+                            serverUpdates++
+                        } else {
+                            val cum = when (config.direction) {
+                                ThroughputDirection.DOWNLOAD -> app.BytesReceived
+                                ThroughputDirection.UPLOAD -> app.BytesSent
+                            }
+                            val delta = (cum - lastClient[s]).coerceAtLeast(0)
+                            lastClient[s] = cum
+                            clientBytes += delta
+                            appBytesTotal += delta
+                            clientUpdates++
                         }
-                        val delta = (cum - lastClient[s]).coerceAtLeast(0)
-                        lastClient[s] = cum
-                        clientBytes += delta
-                        appBytesTotal += delta
-                        clientUpdates++
+                        if (clientUpdates + serverUpdates == 1) firstTs = u.time
+                        lastTs = u.time
                     }
-                    if (clientUpdates + serverUpdates == 1) firstTs = u.time
-                    lastTs = u.time
                 }
+            } catch (t: TimeoutCancellationException) {
+                // Soft end: we timed out waiting for more updates. Do not fail the run;
+                // compute summary from what we have. ThroughputTest will be finished below.
+            }
+            // Surface any error the test recorded
+            test.lastError?.let { throw it }
+
+            // If nothing moved at all, treat as handshake/authorization failure
+            if (appBytesTotal == 0L && clientUpdates == 0 && serverUpdates == 0) {
+                throw MsakException(
+                    MsakErrorCode.HANDSHAKE_FAILED,
+                    "No data or updates received; websocket handshake likely failed"
+                )
             }
 
             val elapsedMs = max(1, (lastTs.toEpochMilliseconds() - firstTs.toEpochMilliseconds()).toInt()).toDouble()
@@ -132,8 +169,17 @@ suspend fun runThroughput(config: ThroughputConfig): ThroughputSummary {
                 serverBytes = serverBytes,
             )
         }
+    } catch (t: Throwable) {
+        // Let coroutine cancellation bubble up unchanged
+        if (t is CancellationException) throw t
+        if (t is MsakException) throw t
+        // Do not re-throw TimeoutCancellationException here as it is handled inside withContext
+        if (t is TimeoutCancellationException) throw t
+        throw mapThrowable(t)
     } finally {
-        // If ThroughputTest exposes an explicit stop/shutdown, invoke it here to ensure sockets close promptly.
-        // e.g., test.stop()
+        runCatching {
+            // Not all platforms expose an explicit stop; call if present.
+            test.stop()
+        }
     }
 }
