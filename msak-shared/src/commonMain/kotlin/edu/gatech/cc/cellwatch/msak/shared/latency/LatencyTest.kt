@@ -33,6 +33,10 @@ import edu.gatech.cc.cellwatch.msak.shared.net.NetHttp
 import edu.gatech.cc.cellwatch.msak.shared.net.SocketFactory
 import edu.gatech.cc.cellwatch.msak.shared.net.*
 
+import kotlinx.coroutines.ensureActive
+import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.withTimeoutOrNull
+
 /**
  * A latency test implemented with KMP primitives (Ktor client + UDP socket).
  *
@@ -58,7 +62,7 @@ class LatencyTest(
     // Lifecycle management for background work
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var job: Job? = null
-    private var activeSocket: KmpUdpSocket? = null // Was marked @vVolatile
+    private var activeSocket: KmpUdpSocket? = null
 
     // Control-plane endpoints
     private val authorizeUrl = server.getLatencyAuthorizeUrl(measurementId)
@@ -101,22 +105,29 @@ class LatencyTest(
             try {
                 run()
             } catch (t: Throwable) {
-                Log.i(TAG, "latency test error", t)
-                error = t
+                if (t is CancellationException) {
+                    // Treat cancellation as a normal shutdown; do not mark as error.
+                    Log.i(TAG, "latency test cancelled")
+                } else {
+                    Log.i(TAG, "latency test error", t)
+                    error = t
+                }
+                throw t
             } finally {
                 finish()
                 _updatesChan.close()
             }
         }
+        // Ensure any pending socket read is unblocked on completion
+        job?.invokeOnCompletion { runCatching { activeSocket?.close() } }
     }
 
     /** Abort early. */
     fun stop() {
         if (!started) error("can't stop before starting")
-        // Closing the socket unblocks a blocking receive on native targets.
+        // Closing the socket unblocks a pending receive on native targets.
         activeSocket?.let { runCatching { it.close() } }
         job?.cancel()
-        finish()
     }
 
     // Core flow
@@ -133,6 +144,7 @@ class LatencyTest(
         // Open UDP socket to serverHost:resolvedLatencyPort
         val sock = SocketFactory.udp()
         activeSocket = sock
+        coroutineContext.ensureActive()
         val resolvedPort = if (latencyPort > 0) latencyPort else (server.latencyUdpPort ?: 1053)
         try {
             Log.d(TAG, "connecting UDP → host=$serverHost port=$resolvedPort")
@@ -233,6 +245,9 @@ class LatencyTest(
      * recording each update.
      */
     private suspend fun echoPackets(sock: KmpUdpSocket, initialMessage: LatencyMessage) {
+        val recvPoll = 200.milliseconds
+
+        coroutineContext.ensureActive()
 
         /*
          * This JSON is manually constructed with hard-coded property names.
@@ -260,6 +275,7 @@ class LatencyTest(
             val maxAttempts = 3
             var rem = maxAttempts
             while (!gotFirst && rem > 0 && isActive) {
+                coroutineContext.ensureActive()
                 Log.d(TAG, "sending initial packet; ${rem - 1} attempt(s) remaining")
                 runCatching { sock.send(initialBytes) }.onFailure {
                     Log.e(TAG, "initial UDP send failed", it)
@@ -283,19 +299,23 @@ class LatencyTest(
         var stopDeadline: Instant? = null
         try {
             while (true) {
-                val pkt = try {
-                    sock.receive(rxBufSize) // adjust if your API exposes a timeout overload
-                } catch (t: Throwable) {
-                    if (ended) break
-                    // keep polling
+                coroutineContext.ensureActive()
+                val pkt = withTimeoutOrNull(recvPoll) { sock.receive(rxBufSize) }
+                if (pkt == null) {
+                    // Timeout poll – check cancellation and deadline again
+                    if (stopDeadline != null && Clock.System.now() >= stopDeadline) {
+                        Log.d(TAG, "no server-driven end; finishing latency on client after duration window")
+                        break
+                    }
                     continue
                 }
-                if (pkt == null) continue
+
                 val now = Clock.System.now()
                 if (!gotFirst) {
                     gotFirst = true
                     retryJob.cancel()
                     stopDeadline = now + duration.milliseconds
+                    coroutineContext.ensureActive()
                 }
 
                 // Decode message and record
@@ -309,6 +329,7 @@ class LatencyTest(
                 }
                 recordUpdate(LatencyUpdate(now, msg))
 
+                coroutineContext.ensureActive()
                 // Echo back
                 runCatching { sock.send(bytes) }.onFailure {
                     if (!ended) Log.e(TAG, "failed to echo UDP packet", it)

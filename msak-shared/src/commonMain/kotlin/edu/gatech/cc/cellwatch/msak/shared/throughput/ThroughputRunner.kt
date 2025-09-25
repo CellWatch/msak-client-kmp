@@ -12,10 +12,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlin.time.Duration.Companion.milliseconds
-import kotlin.time.Duration.Companion.seconds
 import io.ktor.util.network.UnresolvedAddressException
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
 
 
 private fun mapThrowable(t: Throwable): MsakException = when (t) {
@@ -89,6 +89,9 @@ suspend fun runThroughput(config: ThroughputConfig): ThroughputSummary {
         measurementId = config.measurementId,
         userAgent = config.userAgent
     )
+
+    // Register this test as the active one so UI cancel can stop it.
+    ThroughputControl.register(test)
 
     var appBytesTotal = 0L
     var firstTs = Clock.System.now()
@@ -170,13 +173,13 @@ suspend fun runThroughput(config: ThroughputConfig): ThroughputSummary {
             )
         }
     } catch (t: Throwable) {
-        // Let coroutine cancellation bubble up unchanged
+        // Let coroutine cancellation bubble up unchanged; map all other failures (including timeouts) to MsakException
         if (t is CancellationException) throw t
         if (t is MsakException) throw t
-        // Do not re-throw TimeoutCancellationException here as it is handled inside withContext
-        if (t is TimeoutCancellationException) throw t
         throw mapThrowable(t)
     } finally {
+        // Clear active test registration regardless of outcome
+        ThroughputControl.clear(test)
         runCatching {
             // Not all platforms expose an explicit stop; call if present.
             test.stop()

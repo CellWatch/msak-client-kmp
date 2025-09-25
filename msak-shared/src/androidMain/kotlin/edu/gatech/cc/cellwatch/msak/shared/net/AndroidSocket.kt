@@ -5,6 +5,7 @@ import kotlinx.coroutines.withContext
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.*
+import kotlinx.coroutines.CancellationException
 
 /** UDP on Android via java.net.DatagramSocket */
 internal class AndroidUdpSocket : KmpUdpSocket {
@@ -55,6 +56,17 @@ internal class AndroidUdpSocket : KmpUdpSocket {
             s.receive(pkt) // blocks until a datagram arrives or soTimeout elapses
         } catch (e: SocketTimeoutException) {
             return@withContext null
+        } catch (e: SocketException) {
+            // Typical during cancellation: socket closed while blocking in receive()
+            if (closed || s.isClosed) {
+                throw CancellationException("UDP receive cancelled (socket closed)")
+            }
+            throw UdpException("recvfrom() failed")
+        } catch (t: Throwable) {
+            if (closed || s.isClosed) {
+                throw CancellationException("UDP receive cancelled (socket closed)")
+            }
+            throw t
         }
         val data = pkt.data.copyOf(pkt.length)
         val host = (pkt.address?.hostAddress) ?: ""
@@ -64,10 +76,10 @@ internal class AndroidUdpSocket : KmpUdpSocket {
 
     override fun close() {
         if (!closed) {
-            socket?.close()
+            closed = true // mark first to signal any in-flight receive() that we're closing
+            try { socket?.close() } catch (_: Throwable) {}
             socket = null
             connected = false
-            closed = true
         }
     }
 }
@@ -82,11 +94,11 @@ internal class AndroidTcpSocket : KmpTcpSocket {
     override suspend fun connect(host: String, port: Int) = withContext(Dispatchers.IO) {
         check(socket == null) { "socket already open" }
         val s = Socket()
-        // Optional low latency settings
         s.tcpNoDelay = true
-        // Configure timeouts as needed (example 5s connect, 5s read)
+        // Connect with a reasonable timeout; adjust if you have a shared config
         s.connect(InetSocketAddress(host, port), /* timeout ms */ 5000)
-        s.soTimeout = 5000
+        // Read timeout so blocking read wakes periodically (mirrors UDP polling)
+        s.soTimeout = 500
         socket = s
         inStream = s.getInputStream()
         outStream = s.getOutputStream()
@@ -100,21 +112,41 @@ internal class AndroidTcpSocket : KmpTcpSocket {
         data.size
     }
 
+    // KmpTcpSocket.receive returns a ByteArray (not a UdpPacket)
+    // Return an empty ByteArray on timeout or EOF, to signal "no data now".
     override suspend fun receive(maxBytes: Int): ByteArray = withContext(Dispatchers.IO) {
-        val `in` = inStream ?: throw TcpException("socket not open")
+        val s = socket ?: throw TcpException("socket not open")
+        val inp = inStream ?: throw TcpException("socket not open")
         if (maxBytes <= 0) return@withContext ByteArray(0)
         val buf = ByteArray(maxBytes)
-        val n = `in`.read(buf) // -1 on EOF
-        if (n <= 0) ByteArray(0) else buf.copyOf(n)
+        try {
+            val n = inp.read(buf) // blocks until data, timeout, or EOF
+            if (n <= 0) return@withContext ByteArray(0) // timeout or EOF -> empty
+            return@withContext buf.copyOf(n)
+        } catch (e: SocketTimeoutException) {
+            return@withContext ByteArray(0)
+        } catch (e: SocketException) {
+            if (closed || s.isClosed) {
+                throw CancellationException("TCP receive cancelled (socket closed)")
+            }
+            throw TcpException("recv() failed")
+        } catch (t: Throwable) {
+            if (closed || s.isClosed) {
+                throw CancellationException("TCP receive cancelled (socket closed)")
+            }
+            throw t
+        }
     }
 
     override fun close() {
         if (!closed) {
+            closed = true // mark first so any in-flight receive() sees we're closing
             try { inStream?.close() } catch (_: Throwable) {}
             try { outStream?.close() } catch (_: Throwable) {}
             try { socket?.close() } catch (_: Throwable) {}
-            inStream = null; outStream = null; socket = null
-            closed = true
+            inStream = null
+            outStream = null
+            socket = null
         }
     }
 }

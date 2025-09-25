@@ -4,6 +4,8 @@ import android.net.Uri
 import android.os.Bundle
 import android.text.method.ScrollingMovementMethod
 import android.util.Log
+import android.view.View
+import android.widget.Button
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
@@ -19,13 +21,20 @@ import edu.gatech.cc.cellwatch.msak.shared.net.NetHttpConfig
 import edu.gatech.cc.cellwatch.msak.shared.throughput.ThroughputConfig
 import edu.gatech.cc.cellwatch.msak.shared.throughput.ThroughputDirection
 import edu.gatech.cc.cellwatch.msak.shared.throughput.runThroughput
+import edu.gatech.cc.cellwatch.msak.shared.throughput.ThroughputControl
 import edu.gatech.cc.cellwatch.msak_tester.databinding.ActivityMainBinding
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import edu.gatech.cc.cellwatch.msak.shared.latency.LatencyControl
 
 
 class MainActivity : AppCompatActivity() {
     private val TAG = this::class.simpleName
     private lateinit var binding: ActivityMainBinding
+
+    private var currentTestJob: Job? = null
+    private var currentCancelButton: Button? = null
+    private var originalButtonText: CharSequence? = null
 
     private var currentServer: Server? = null
     private enum class ServerSource { LOCAL, LOCATED }
@@ -62,31 +71,102 @@ class MainActivity : AppCompatActivity() {
         binding.tputDuration.setText("5000")
         binding.tputDelay.setText("0")
 
-        // setup buttons
-        binding.btnLatency.setOnClickListener { wrapTestRun { testLatency() } }
-        binding.btnDownload.setOnClickListener { wrapTestRun { testThroughput(ThroughputDirection.DOWNLOAD) } }
-        binding.btnUpload.setOnClickListener { wrapTestRun { testThroughput(ThroughputDirection.UPLOAD) } }
+        // setup buttons (tests become cancel-able while running)
+        binding.btnLatency.setOnClickListener { wrapTestRun(binding.btnLatency) { testLatency() } }
+        binding.btnDownload.setOnClickListener { wrapTestRun(binding.btnDownload) { testThroughput(ThroughputDirection.DOWNLOAD) } }
+        binding.btnUpload.setOnClickListener { wrapTestRun(binding.btnUpload) { testThroughput(ThroughputDirection.UPLOAD) } }
 
-        // locate buttons (parity with iOS: 📍L and 📍T)
-        binding.btnLocateLatency.setOnClickListener { wrapTestRun { locateLatencyAndPopulate() } }
-        binding.btnLocateThroughput.setOnClickListener { wrapTestRun { locateThroughputAndPopulate() } }
+        // locate buttons remain "fire-and-forget"
+        binding.btnLocateLatency.setOnClickListener { wrapFireAndForget { locateLatencyAndPopulate() } }
+        binding.btnLocateThroughput.setOnClickListener { wrapFireAndForget { locateThroughputAndPopulate() } }
 
         // setup output view
         binding.output.movementMethod = ScrollingMovementMethod()
     }
 
-    fun wrapTestRun(testRun: suspend () -> Unit) {
+    private fun wrapFireAndForget(block: suspend () -> Unit) {
         lifecycleScope.launch {
             setBtnsEnabled(false)
-            testRun()
-            setBtnsEnabled(true)
+            try {
+                block()
+            } finally {
+                setBtnsEnabled(true)
+            }
         }
     }
 
+    private fun wrapTestRun(trigger: Button, block: suspend () -> Unit) {
+        // If a test is already running, ignore new requests; user can press the active cancel button instead.
+        if (currentTestJob != null) return
+
+        // Prepare UI: disable other buttons but keep the trigger enabled and convert it to a Cancel button.
+        setBtnsEnabled(false)
+        trigger.isEnabled = true
+        currentCancelButton = trigger
+        originalButtonText = trigger.text
+        trigger.text = "Cancel"
+
+        // Clicking the trigger now cancels the running job (and actively stops latency/throughput if any).
+        trigger.setOnClickListener {
+            val tputStopped = ThroughputControl.cancelActive() // no-op if not a throughput test
+            val latStopped  = LatencyControl.cancelActive()    // no-op if not a latency test
+            if (tputStopped) printInfo("Requested throughput stop")
+            if (latStopped)  printInfo("Requested latency stop")
+            printInfo("Cancelling current test…")
+            currentTestJob?.cancel()
+        }
+
+        // Launch the test job
+        currentTestJob = lifecycleScope.launch {
+            try {
+                block()
+            } catch (t: Throwable) {
+                when (t) {
+                    is kotlinx.coroutines.CancellationException -> {
+                        // Cancellation is an expected user action; log as info only.
+                        printMsg("INFO: cancellation complete")
+                    }
+                    else -> {
+                        Log.e(TAG, "test run failed", t)
+                        // Surface a concise message in the UI log; header above already shows which test.
+                        printError(t.message ?: t::class.simpleName ?: "unknown error")
+                    }
+                }
+            } finally {
+                // Restore button + listeners and re-enable all controls
+                restoreTriggerButton()
+                setBtnsEnabled(true)
+                currentTestJob = null
+            }
+        }
+    }
+
+    private fun restoreTriggerButton() {
+        val btn = currentCancelButton ?: return
+        val original = originalButtonText ?: return
+        // Restore label
+        btn.text = original
+        // Restore original click behavior matching the label
+        when (btn) {
+            binding.btnLatency -> btn.setOnClickListener { wrapTestRun(binding.btnLatency) { testLatency() } }
+            binding.btnDownload -> btn.setOnClickListener { wrapTestRun(binding.btnDownload) { testThroughput(ThroughputDirection.DOWNLOAD) } }
+            binding.btnUpload -> btn.setOnClickListener { wrapTestRun(binding.btnUpload) { testThroughput(ThroughputDirection.UPLOAD) } }
+            else -> { /* no-op */ }
+        }
+        currentCancelButton = null
+        originalButtonText = null
+    }
+
     fun setBtnsEnabled(enabled: Boolean) {
-        binding.btnLatency.isEnabled = enabled
-        binding.btnDownload.isEnabled = enabled
-        binding.btnUpload.isEnabled = enabled
+        val cancelBtn = currentCancelButton
+        val apply = { b: Button ->
+            // Keep the active cancel button enabled even when others are disabled
+            b.isEnabled = enabled || (cancelBtn != null && b === cancelBtn)
+        }
+        apply(binding.btnLatency)
+        apply(binding.btnDownload)
+        apply(binding.btnUpload)
+        // Locate buttons are never the cancel button
         binding.btnLocateLatency.isEnabled = enabled
         binding.btnLocateThroughput.isEnabled = enabled
     }
@@ -123,13 +203,8 @@ class MainActivity : AppCompatActivity() {
             duration = durationMs,
             userAgent = USER_AGENT
         )
-        try {
-            val summary = runLatency(cfg)
-            printMsg("Result → ${summary.asText()}")
-        } catch (t: Throwable) {
-            Log.e(TAG, "Latency failed", t)
-            printError("Latency failed: ${t.message ?: t::class.simpleName ?: "unknown"}")
-        }
+        val summary = runLatency(cfg)
+        printMsg("Result → ${summary.asText()}")
     }
 
     /** Demonstrates building a ThroughputConfig and calling the shared API (unified server). */
@@ -154,13 +229,8 @@ class MainActivity : AppCompatActivity() {
             measurementId = "android-demo",
             userAgent = USER_AGENT
         )
-        try {
-            val summary = runThroughput(cfg)
-            printMsg("Result → ${summary.asText()}")
-        } catch (t: Throwable) {
-            Log.e(TAG, "Throughput failed", t)
-            printError("Throughput ${dir.name} failed: ${t.message ?: t::class.simpleName ?: "unknown"}")
-        }
+        val summary = runThroughput(cfg)
+        printMsg("Result → ${summary.asText()}")
     }
 
 

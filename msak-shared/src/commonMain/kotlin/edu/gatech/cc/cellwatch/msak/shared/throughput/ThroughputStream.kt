@@ -1,4 +1,3 @@
-// commonMain/edu/.../throughput/ThroughputStreamKmp.kt
 package edu.gatech.cc.cellwatch.msak.shared.throughput
 
 import edu.gatech.cc.cellwatch.msak.shared.net.KmpWebSocket
@@ -26,6 +25,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import io.ktor.http.URLBuilder
 import io.ktor.http.Url
+import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * A single TCP stream used to measure throughput.
@@ -67,6 +69,7 @@ class ThroughputStream(
     private var ws: KmpWebSocket? = null
     private val _updatesChan = Channel<ThroughputUpdate>(capacity = 32)
     private val _updates = ArrayList<ThroughputUpdate>()
+    private val updatesLock = Mutex()
     val updatesChan: ReceiveChannel<ThroughputUpdate> = _updatesChan
     // val updates: List<ThroughputUpdate> = _updates
 
@@ -184,14 +187,22 @@ class ThroughputStream(
                     Log.d(logTAG, "websocket incoming completed")
                     finish(null)
                 } catch (t: Throwable) {
-                    // Receiving failed. Mark as failure.
-                    Log.d(logTAG, "websocket receive loop failed for ${finalUrl}", t)
-                    finish(FailureException())
+                    if (t is CancellationException) {
+                        Log.d(logTAG, "websocket receive loop cancelled")
+                        finish(null)
+                    } else {
+                        Log.d(logTAG, "websocket receive loop failed for ${finalUrl}", t)
+                        finish(FailureException())
+                    }
                 }
             } catch (t: Throwable) {
-                // Connect failed or other setup error.
-                Log.d(logTAG, "websocket connect failed for ${finalUrl}", t)
-                finish(FailureException())
+                if (t is CancellationException) {
+                    Log.d(logTAG, "websocket connect cancelled for ${finalUrl}")
+                    finish(null)
+                } else {
+                    Log.d(logTAG, "websocket connect failed for ${finalUrl}", t)
+                    finish(FailureException())
+                }
             }
         }
     }
@@ -269,7 +280,11 @@ class ThroughputStream(
     private fun sendUpdate(update: ThroughputUpdate) {
         val r = _updatesChan.trySend(update)
         if (!r.isSuccess) Log.d(logTAG, "failed to send throughput update: $r")
-        if (!r.isClosed) _updates.add(update)
+        if (!r.isClosed) {
+            scope.launch {
+                updatesLock.withLock { _updates.add(update) }
+            }
+        }
     }
 
     private fun finish(err: Throwable? = null) {

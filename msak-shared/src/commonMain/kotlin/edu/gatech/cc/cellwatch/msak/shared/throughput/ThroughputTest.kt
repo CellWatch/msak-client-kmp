@@ -16,6 +16,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.datetime.Clock
 import kotlinx.datetime.Instant
 import kotlinx.atomicfu.atomic
@@ -102,6 +103,9 @@ class ThroughputTest(
     /** The hostname of the server against which the test runs. */
     val serverHost: String = runCatching { Url(url).host }.getOrElse { "<invalid>" }
 
+    // Signal that completes when the test fully ends (finish() called)
+    private val endSignal = CompletableDeferred<Unit>()
+
     private fun isHarnessBug(t: Throwable): Boolean =
         t is IllegalStateException ||
         t is IllegalArgumentException ||
@@ -175,6 +179,25 @@ class ThroughputTest(
         finish()
     }
 
+    /**
+     * Alias for [stop] to match common cancellation terminology.
+     * Safe to call multiple times.
+     */
+    fun cancel() = stop()
+
+    /**
+     * Request test cancellation and suspend until the test has fully ended.
+     */
+    suspend fun stopAndAwait() {
+        stop()
+        awaitEnd()
+    }
+
+    /**
+     * Suspend until the test ends (updates channel is closed and finish() has run).
+     */
+    suspend fun awaitEnd() = endSignal.await()
+
     private fun finish() {
         if (ended) return
 
@@ -197,6 +220,10 @@ class ThroughputTest(
 
         _updatesChan.close()
         endTime = Clock.System.now()
+        // Complete end signal if not already completed
+        if (!endSignal.isCompleted) {
+            endSignal.complete(Unit)
+        }
     }
 
     private suspend fun runStream(index: Int, stream: ThroughputStream) {

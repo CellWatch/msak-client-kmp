@@ -3,6 +3,9 @@ package edu.gatech.cc.cellwatch.msak.shared.net
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.CancellationException
 import kotlinx.cinterop.*
 import platform.posix.*
 import kotlinx.cinterop.ExperimentalForeignApi
@@ -196,9 +199,27 @@ internal class IosUdpSocket : KmpUdpSocket {
             val buf = ByteArray(maxBytes)
             var nBytes = 0
             buf.usePinned { pinned ->
-                nBytes = recvfrom(fd, pinned.addressOf(0), maxBytes.convert(), 0,
-                    storage.ptr.reinterpret(), addrLen.ptr).toInt()
-                if (nBytes < 0) throw UdpException("recvfrom() failed", errno)
+                nBytes = recvfrom(
+                    fd,
+                    pinned.addressOf(0),
+                    maxBytes.convert(),
+                    0,
+                    storage.ptr.reinterpret(),
+                    addrLen.ptr
+                ).toInt()
+                if (nBytes < 0) {
+                    val e = errno
+                    // If we were cancelled or the socket was closed, surface a cooperative cancellation instead of crashing.
+                    val ctx = currentCoroutineContext()
+                    if (closed || !ctx.isActive || e == EBADF) {
+                        throw CancellationException("UDP receive cancelled")
+                    }
+                    // Timeout from SO_RCVTIMEO: return null so callers can poll and re-check state.
+                    if (e == EAGAIN || e == EWOULDBLOCK) {
+                        return@withContext null
+                    }
+                    throw UdpException("recvfrom() failed", e)
+                }
             }
             // Decode peer address
             val (host, port) = sockaddrToHostPort(storage)

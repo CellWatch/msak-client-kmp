@@ -16,6 +16,8 @@ import kotlin.math.roundToLong
 import edu.gatech.cc.cellwatch.msak.shared.MsakException
 import edu.gatech.cc.cellwatch.msak.shared.MsakErrorCode
 import kotlin.coroutines.cancellation.CancellationException
+import edu.gatech.cc.cellwatch.msak.shared.net.UdpException
+import kotlinx.coroutines.CoroutineExceptionHandler
 
 /**
  * Configuration for a latency measurement run.
@@ -102,7 +104,24 @@ suspend fun runLatency(config: LatencyConfig): LatencySummary {
         userAgent = config.userAgent,
     )
     try {
-        withContext(Dispatchers.Default + SupervisorJob()) {
+        // Suppress child coroutine exceptions (e.g., recvfrom() errors on socket close) so they
+        // don't bubble to the platform's "uncaught exception" handler on iOS.
+        val handler = CoroutineExceptionHandler { _, e ->
+            when (e) {
+                is CancellationException -> {
+                    // Expected on user cancel; ignore.
+                }
+                is UdpException -> {
+                    // Common during stop(): socket closes while a blocking recv() is in-flight.
+                    // LatencyTest will record/set lastError (or not) and we surface below; no crash.
+                }
+                else -> {
+                    // Leave other errors to be surfaced via test.lastError; don't rethrow here.
+                }
+            }
+        }
+        withContext(Dispatchers.Default + SupervisorJob() + handler) {
+            LatencyControl.register(test)
             test.start()
             withTimeoutOrNull(config.duration.milliseconds + 3.seconds) {
                 for (u in test.updatesChan) {
@@ -134,9 +153,14 @@ suspend fun runLatency(config: LatencyConfig): LatencySummary {
             meanMs = mean,
             stdevMs = stdev
         )
+    } catch (ce: CancellationException) {
+        // If caller cancels, ensure the underlying test stops promptly, then rethrow.
+        runCatching { test.stop() }
+        throw ce
     } finally {
-        // If LatencyTest exposes an explicit stop/shutdown, invoke it here to ensure sockets close promptly.
-        // e.g., test.stop()
+        // Ensure sockets/UDP are closed and background jobs are cancelled even on success.
+        runCatching { test.stop() }
+        LatencyControl.clear(test)
     }
 }
 
@@ -152,14 +176,16 @@ fun latencyFlow(config: LatencyConfig): Flow<LatencyUpdate> = channelFlow {
         userAgent = config.userAgent,
     )
     val job = launch(Dispatchers.Default) {
+        LatencyControl.register(test)
         test.start()
         for (u in test.updatesChan) send(u)
     }
     awaitClose {
         // Ensure the sender coroutine is cancelled when the collector stops.
         job.cancel()
+        // Ensure UDP/socket resources are released even if the job was already done.
+        runCatching { test.stop() }
+        LatencyControl.clear(test)
         // We don't throw from flows; the LatencyTest will have logged any errors.
-        // If LatencyTest exposes an explicit stop, invoke it here as well.
-        // e.g., test.stop()
     }
 }

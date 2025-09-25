@@ -29,6 +29,19 @@ struct ContentView: View {
     @State private var throughputUploadStatus: String = "Idle"
     @State private var logLines: [String] = []
 
+    // Running state + task handles for cancel support
+    @State private var isLatencyRunning: Bool = false
+    @State private var isDownloadRunning: Bool = false
+    @State private var isUploadRunning: Bool = false
+
+    @State private var latencyTask: Task<Void, Never>? = nil
+    @State private var downloadTask: Task<Void, Never>? = nil
+    @State private var uploadTask: Task<Void, Never>? = nil
+    // Track user-initiated cancels so we can distinguish from genuine errors
+    @State private var latencyCancelRequested: Bool = false
+    @State private var downloadCancelRequested: Bool = false
+    @State private var uploadCancelRequested: Bool = false
+
     private func appendLog(_ line: String) {
         print(line)
         DispatchQueue.main.async {
@@ -139,11 +152,23 @@ struct ContentView: View {
 
                     // Actions (no output labels here; results go to the log)
                     HStack {
-                        Button("Test Latency") { runLatency() }
+                        if isLatencyRunning {
+                            Button("Cancel") { cancelLatency() }
+                        } else {
+                            Button("Latency") { runLatency() }
+                        }
                         Spacer()
-                        Button("Test Download") { runThroughput(direction: .download) }
+                        if isDownloadRunning {
+                            Button("Cancel") { cancelDownload() }
+                        } else {
+                            Button("Download") { runThroughput(direction: .download) }
+                        }
                         Spacer()
-                        Button("Test Upload") { runThroughput(direction: .upload) }
+                        if isUploadRunning {
+                            Button("Cancel") { cancelUpload() }
+                        } else {
+                            Button("Upload") { runThroughput(direction: .upload) }
+                        }
                     }
                 }
                 .padding(.horizontal)
@@ -180,6 +205,11 @@ struct ContentView: View {
         .onAppear {
             ensureNetHttpInitialized()
             if currentServer == nil && serverSource == .local { rebuildLocalServerFromFields() }
+        }
+        .onDisappear {
+            latencyTask?.cancel()
+            downloadTask?.cancel()
+            uploadTask?.cancel()
         }
     }
 
@@ -360,6 +390,25 @@ struct ContentView: View {
             }
         }
     }
+    // MARK: - Cancel helpers
+    private func cancelLatency() {
+        appendLog("Cancel requested: Latency")
+        MsakShared.LatencyControl.shared.cancelActive()
+        latencyCancelRequested = true
+        latencyTask?.cancel()
+    }
+    private func cancelDownload() {
+        appendLog("Cancel requested: Download")
+        MsakShared.ThroughputControl.shared.cancelActive()
+        downloadCancelRequested = true
+        downloadTask?.cancel()
+    }
+    private func cancelUpload() {
+        appendLog("Cancel requested: Upload")
+        MsakShared.ThroughputControl.shared.cancelActive()
+        uploadCancelRequested = true
+        uploadTask?.cancel()
+    }
 
     // MARK: - Actions
 
@@ -370,15 +419,10 @@ struct ContentView: View {
         // Parse inputs with defaults
         let dur = Int64(latencyDurationMs.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 3000
 
-        // Build Server using ServerFactory (http). If you require HTTPS, update ServerFactory in shared code.
-        // Kotlin 'object' maps to a Swift type with a `shared` singleton.
         let server = activeServer()
-        if serverSource == .located {
-            appendLog("Latency: using located server URLs (with access_token)")
-        }
+        if serverSource == .located { appendLog("Latency: using located server URLs (with access_token)") }
         appendLog("Latency: server=\(server.machine)")
 
-        // Build config — do NOT force the UDP port here; shared code will choose based on environment/host.
         let cfg = LatencyConfig(
             server: server,
             measurementId: "ios-demo",
@@ -386,43 +430,61 @@ struct ContentView: View {
             userAgent: USER_AGENT
         )
 
-        Task {
+        MsakShared.LatencyControl.shared.reset()
+        latencyCancelRequested = false
+        isLatencyRunning = true
+        latencyTask = Task { @MainActor in
             do {
-                // NOTE: Top-level Kotlin functions from LatencyRunner.kt are usually surfaced under `LatencyRunnerKt`.
-                // If your generated symbol differs, Xcode will suggest the correct name on build.
                 let summary = try await LatencyRunnerKt.runLatency(config: cfg)
-                let text = summary.asText()
-                appendLog("Latency OK: \(text)")
-                latencyStatus = text
+                if latencyCancelRequested {
+                    appendLog("INFO: latency cancellation complete")
+                    latencyStatus = "Canceled"
+                } else {
+                    let text = summary.asText()
+                    appendLog("Latency OK: \(text)")
+                    latencyStatus = text
+                }
+            } catch is CancellationError {
+                appendLog("INFO: latency cancellation complete")
+                latencyStatus = "Canceled"
             } catch {
-                let msg = (error as NSError).localizedDescription
-                appendLog("Latency error: \(msg)")
-                latencyStatus = "Error: \(msg)"
+                if latencyCancelRequested {
+                    appendLog("INFO: latency cancellation complete")
+                    latencyStatus = "Canceled"
+                } else {
+                    let msg = (error as NSError).localizedDescription
+                    appendLog("Latency error: \(msg)")
+                    latencyStatus = "Error: \(msg)"
+                }
             }
+            latencyCancelRequested = false
+            isLatencyRunning = false
+            latencyTask = nil
         }
     }
 
     private func runThroughput(direction: ThroughputDirection) {
-        if direction == .download {
+        switch direction {
+        case .download:
             throughputDownloadStatus = "Running download…"
-        } else {
+        case .upload:
             throughputUploadStatus = "Running upload…"
+        default:
+            throughputDownloadStatus = "Running…"
+            throughputUploadStatus = "Running…"
         }
         appendLog("Throughput \(direction.name): starting")
 
-        // Parse inputs with defaults
         let streams = Int32(tpStreams.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 2
         let dur = Int64(tpDurationMs.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 5000
         let delay = Int64(tpDelayMs.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
 
-        // Build Server using ServerFactory (ws). If you require WSS, update ServerFactory in shared code.
         let server = activeServer()
         if serverSource == .located {
             appendLog("Throughput \(direction.name): using located server URLs (with access_token)")
         }
         appendLog("Throughput \(direction.name): server=\(server.machine)")
 
-        // Build config
         let cfg = ThroughputConfig(
             server: server,
             direction: direction,
@@ -433,27 +495,48 @@ struct ContentView: View {
             measurementId: "ios-demo"
         )
 
-        Task {
+        if direction == .download { downloadCancelRequested = false } else { uploadCancelRequested = false }
+
+        // Ensure no stale cancel flag from a previous run
+        MsakShared.ThroughputControl.shared.reset()
+
+        // Mark running + capture task handle by direction
+        func done() {
+            if direction == .download { isDownloadRunning = false; downloadTask = nil }
+            else { isUploadRunning = false; uploadTask = nil }
+        }
+        if direction == .download { isDownloadRunning = true } else { isUploadRunning = true }
+
+        let task = Task { @MainActor in
             do {
-                // Top-level Kotlin function from ThroughputRunner.kt usually appears under `ThroughputRunnerKt`.
                 let summary = try await ThroughputRunnerKt.runThroughput(config: cfg)
-                let text = summary.asText()
-                appendLog("Throughput \(direction.name) OK: \(text)")
-                if direction == .download {
-                    throughputDownloadStatus = text
+                let wasCanceled = (direction == .download) ? downloadCancelRequested : uploadCancelRequested
+                if wasCanceled {
+                    appendLog("INFO: throughput \(direction.name) cancellation complete")
+                    if direction == .download { throughputDownloadStatus = "Canceled" } else { throughputUploadStatus = "Canceled" }
                 } else {
-                    throughputUploadStatus = text
+                    let text = summary.asText()
+                    appendLog("Throughput \(direction.name) OK: \(text)")
+                    if direction == .download { throughputDownloadStatus = text } else { throughputUploadStatus = text }
                 }
+            } catch is CancellationError {
+                appendLog("INFO: throughput \(direction.name) cancellation complete")
+                if direction == .download { throughputDownloadStatus = "Canceled" } else { throughputUploadStatus = "Canceled" }
             } catch {
-                let msg = (error as NSError).localizedDescription
-                appendLog("Throughput \(direction.name) error: \(msg)")
-                if direction == .download {
-                    throughputDownloadStatus = "Error: \(msg)"
+                let wasCanceled = (direction == .download) ? downloadCancelRequested : uploadCancelRequested
+                if wasCanceled {
+                    appendLog("INFO: throughput \(direction.name) cancellation complete")
+                    if direction == .download { throughputDownloadStatus = "Canceled" } else { throughputUploadStatus = "Canceled" }
                 } else {
-                    throughputUploadStatus = "Error: \(msg)"
+                    let msg = (error as NSError).localizedDescription
+                    appendLog("Throughput \(direction.name) error: \(msg)")
+                    if direction == .download { throughputDownloadStatus = "Error: \(msg)" } else { throughputUploadStatus = "Error: \(msg)" }
                 }
             }
+            if direction == .download { downloadCancelRequested = false } else { uploadCancelRequested = false }
+            done()
         }
+        if direction == .download { downloadTask = task } else { uploadTask = task }
     }
 
 }
