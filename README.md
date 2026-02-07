@@ -120,6 +120,88 @@ dependencies {
 }
 ```
 
+### Java toolchain alignment (Android Studio + terminal + Xcode)
+
+This project is sensitive to JDK mismatches across shell, Android Studio, and Xcode-driven Gradle runs.
+
+Use JDK 17 and keep all three configuration points aligned to the same absolute JDK path:
+
+1. Shell (SDKMAN, jEnv, manual `JAVA_HOME`, or similar)
+2. Android Studio (`GRADLE_LOCAL_JAVA_HOME` via `.gradle/config.properties`)
+3. Gradle property pin used by non-interactive Gradle/Xcode runs (`org.gradle.java.home`)
+
+Example JDK path used below (use your own local JDK 17 path if different):
+
+```text
+/opt/homebrew/opt/sdkman-cli/libexec/candidates/java/17.0.8-tem
+```
+
+#### 1) Shell (tooling is up to you)
+
+`.sdkmanrc` is tracked as one option for terminal sessions:
+
+```bash
+sdk env
+```
+
+If you do not use SDKMAN, set `JAVA_HOME` via your preferred tool/process.
+If your shell does not auto-apply `.sdkmanrc`, configure SDKMAN auto-env or use a shell hook.
+
+#### 2) Android Studio (`GRADLE_LOCAL_JAVA_HOME`)
+
+Set Android Studio Gradle JDK to `GRADLE_LOCAL_JAVA_HOME`.
+
+That value comes from:
+
+```text
+.gradle/config.properties
+```
+
+Create/update it (example):
+
+```properties
+java.home=/opt/homebrew/opt/sdkman-cli/libexec/candidates/java/17.0.8-tem
+```
+
+#### 3) Gradle property pin (Xcode/non-interactive Gradle)
+
+This repo currently pins Gradle JVM in:
+
+```text
+gradle.properties
+```
+
+with (example):
+
+```properties
+org.gradle.java.home=/opt/homebrew/opt/sdkman-cli/libexec/candidates/java/17.0.8-tem
+```
+
+If your local path differs, update this value accordingly.
+
+#### Verification
+
+From terminal:
+
+```bash
+java -version
+./gradlew -version
+```
+
+In Android Studio:
+
+1. Check `Build, Execution, Deployment > Build Tools > Gradle > Gradle JDK`.
+2. Ensure it is `GRADLE_LOCAL_JAVA_HOME`.
+3. Re-sync project.
+
+If behavior looks inconsistent, stop daemons and clear caches before retrying:
+
+```bash
+./gradlew --stop
+rm -rf .gradle .gradle-local
+rm -rf ~/.gradle/caches ~/.gradle/daemon ~/.gradle/native
+```
+
 ## Credits
 
 msak-android was developed using [Roberto D'Auria's early MSAK implementation](https://github.com/robertodauria/msak/) as a reference. It also provides a basic re-implementation of [M-Lab's memoryless package](https://github.com/m-lab/go/tree/main/memoryless) in Kotlin.
