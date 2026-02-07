@@ -49,7 +49,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		1F4AC3432E6A2A8400980EE9 /* MsakShared.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = MsakShared.xcframework; path = "../msak-shared/build/XCFrameworks/Debug/MsakShared.xcframework"; sourceTree = SOURCE_ROOT; };
+		1F4AC3432E6A2A8400980EE9 /* MsakShared.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = MsakShared.xcframework; path = "../msak-shared/build/XCFrameworks/Current/MsakShared.xcframework"; sourceTree = SOURCE_ROOT; };
 		1F70C0BB2E671A5000A7FC72 /* msak-ios-tester.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "msak-ios-tester.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		1F70C0C92E671A5200A7FC72 /* msak-ios-testerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "msak-ios-testerTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		1F70C0D32E671A5200A7FC72 /* msak-ios-testerUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "msak-ios-testerUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -291,7 +291,7 @@
 			outputFileListPaths = (
 			);
 			outputPaths = (
-				"$(SRCROOT)/../msak-shared/build/XCFrameworks/Debug/MsakShared.xcframework",
+				"$(SRCROOT)/../msak-shared/build/XCFrameworks/Current/MsakShared.xcframework",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
