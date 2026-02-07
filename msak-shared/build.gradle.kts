@@ -6,7 +6,6 @@ plugins {
     alias(libs.plugins.android.kotlin.multiplatform.library)
     alias(libs.plugins.jetbrains.kotlin.serialization)
     alias(libs.plugins.jetbrains.kotlin.atomicfu)
-    alias(libs.plugins.kmp.nativecoroutines) // from libs.versions.toml
 }
 
 kotlin {
@@ -61,6 +60,7 @@ kotlin {
         // Ensure all source sets opt-in consistently to avoid hierarchy mismatches
         all {
             languageSettings.optIn("kotlinx.serialization.ExperimentalSerializationApi")
+            languageSettings.optIn("kotlin.ExperimentalStdlibApi")
         }
         commonMain {
 
