@@ -103,22 +103,58 @@ By default, msak-android uses `android.util.Log` to log. You can call `setLogger
 
 ## Development setup
 
-msak-android is an Android Studio project. For local testing, it may be useful to publish to the configured local repository (`./gradlew publishAllPublicationsToLocalRepository`) and then set up your app to consume the library from that local repository:
+msak-android is an Android Studio project.
 
+### Local distribution (current)
+
+Local distribution supports:
+
+1. Maven local cache publication for Android/KMP consumers.
+2. Local XCFramework zip + checksum output for iOS/Xcode consumers.
+
+Run:
+
+```bash
+./gradlew :msak-shared:publishLocalMavenAndXcframework
 ```
-// in settings.gradle (make sure you adjust the path)
+
+Outputs:
+
+1. Maven local cache (`~/.m2/repository`) with coordinate:
+   - `edu.gatech.cc.cellwatch:msak-client-kmp:0.2.0`
+2. Local XCFramework artifacts:
+   - `/Users/jeff/Projects/msak-android/msak-shared/build/local-dist/apple/msak-client-kmp/0.2.0/MsakShared.xcframework.zip`
+   - `/Users/jeff/Projects/msak-android/msak-shared/build/local-dist/apple/msak-client-kmp/0.2.0/MsakShared.xcframework.sha256`
+
+Android/KMP consumer example:
+
+```kotlin
+// settings.gradle(.kts)
 dependencyResolutionManagement {
     repositories {
-        maven { url 'file:///path/to/msak-android/msak-android/build/repo' }
-        // ...
+        mavenLocal()
+        google()
+        mavenCentral()
     }
 }
+```
 
-// in build.gradle (make sure you adjust the version)
+```kotlin
+// build.gradle(.kts)
 dependencies {
-    implementation 'edu.gatech.cc.cellwatch:msak:<version>'
+    implementation("edu.gatech.cc.cellwatch:msak-client-kmp:0.2.0")
 }
 ```
+
+iOS/Xcode local consumption:
+
+1. Unzip `MsakShared.xcframework.zip` to a stable local path in your consumer project.
+2. Add `MsakShared.xcframework` to Xcode target dependencies/frameworks.
+
+### Remote distribution status
+
+Remote distribution for either Maven artifacts or Apple binary artifacts is not set up yet.
+Current support is local-only distribution for development and integration testing.
 
 ### Java toolchain alignment (Android Studio + terminal + Xcode)
 

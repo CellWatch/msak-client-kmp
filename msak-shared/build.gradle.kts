@@ -1,4 +1,6 @@
 import org.jetbrains.kotlin.gradle.plugin.mpp.apple.XCFramework
+import org.gradle.api.publish.maven.MavenPublication
+import java.security.MessageDigest
 
 
 plugins {
@@ -6,7 +8,11 @@ plugins {
     alias(libs.plugins.android.kotlin.multiplatform.library)
     alias(libs.plugins.jetbrains.kotlin.serialization)
     alias(libs.plugins.jetbrains.kotlin.atomicfu)
+    `maven-publish`
 }
+
+group = "edu.gatech.cc.cellwatch"
+version = "0.2.0"
 
 kotlin {
 
@@ -128,6 +134,64 @@ kotlin {
         }
     }
 
+}
 
+publishing {
+    publications.withType<MavenPublication>().configureEach {
+        groupId = project.group.toString()
+        version = project.version.toString()
 
+        artifactId = when (name) {
+            "kotlinMultiplatform" -> "msak-client-kmp"
+            else -> "msak-client-kmp-$name"
+        }
+    }
+
+    repositories {
+        maven {
+            name = "local"
+            url = uri(layout.buildDirectory.dir("repo"))
+        }
+    }
+}
+
+val localAppleDistDir = layout.buildDirectory.dir("local-dist/apple/msak-client-kmp/${project.version}")
+
+tasks.register<Zip>("zipLocalDebugXcframework") {
+    dependsOn("assembleMsakSharedDebugXCFramework")
+    from(layout.buildDirectory.dir("XCFrameworks/debug/MsakShared.xcframework")) {
+        into("MsakShared.xcframework")
+    }
+    archiveFileName.set("MsakShared.xcframework.zip")
+    destinationDirectory.set(localAppleDistDir)
+}
+
+tasks.register("writeLocalDebugXcframeworkSha256") {
+    dependsOn("zipLocalDebugXcframework")
+    doLast {
+        val zipFile = localAppleDistDir.get().file("MsakShared.xcframework.zip").asFile
+        val digest = MessageDigest.getInstance("SHA-256")
+        zipFile.inputStream().use { input ->
+            val buffer = ByteArray(8192)
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        val hash = digest.digest().joinToString("") { "%02x".format(it) }
+        val shaFile = localAppleDistDir.get().file("MsakShared.xcframework.sha256").asFile
+        shaFile.parentFile.mkdirs()
+        shaFile.writeText("$hash  MsakShared.xcframework.zip\n")
+    }
+}
+
+tasks.register("publishLocalMavenAndXcframework") {
+    group = "publishing"
+    description = "Publishes to mavenLocal and creates local XCFramework zip+sha artifacts."
+    dependsOn(
+        "publishToMavenLocal",
+        "zipLocalDebugXcframework",
+        "writeLocalDebugXcframeworkSha256",
+    )
 }
