@@ -10,6 +10,6 @@ import kotlinx.serialization.Serializable
  */
 @Serializable
 data class ByteCounters(
-    val BytesSent: Long,
-    val BytesReceived: Long,
+    val BytesSent: Long = 0,
+    val BytesReceived: Long = 0,
 )
