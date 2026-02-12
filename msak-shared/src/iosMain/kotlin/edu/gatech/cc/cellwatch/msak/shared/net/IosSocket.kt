@@ -221,9 +221,11 @@ internal class IosUdpSocket : KmpUdpSocket {
                     throw UdpException("recvfrom() failed", e)
                 }
             }
-            // Decode peer address
-            val (host, port) = sockaddrToHostPort(storage)
-            UdpPacket(if (nBytes <= 0) ByteArray(0) else buf.copyOf(nBytes), host, port)
+            // Decode peer address. Some simulator/local UDP paths can return address families
+            // that getnameinfo() rejects; treat that as non-fatal and keep payload delivery.
+            val packet = if (nBytes <= 0) ByteArray(0) else buf.copyOf(nBytes)
+            val (host, port) = sockaddrToHostPort(storage, addrLen.value) ?: ("" to 0)
+            UdpPacket(packet, host, port)
         }
     }
 
@@ -300,7 +302,9 @@ internal class IosUdpSocket : KmpUdpSocket {
         } while (rc == -1 && errno == EINTR)
     }
 
-    private fun sockaddrToHostPort(storage: sockaddr_storage): Pair<String, Int> = memScoped {
+    private fun sockaddrToHostPort(storage: sockaddr_storage, addrLen: socklen_t): Pair<String, Int>? = memScoped {
+        if (addrLen.toInt() <= 0) return@memScoped null
+
         val hostBuf = ByteArray(NI_MAXHOST)
         val servBuf = ByteArray(NI_MAXSERV)
 
@@ -308,7 +312,7 @@ internal class IosUdpSocket : KmpUdpSocket {
             servBuf.usePinned { sp ->
                 getnameinfo(
                     storage.ptr.reinterpret(),
-                    sizeOf<sockaddr_storage>().convert(),
+                    addrLen,
                     hp.addressOf(0),
                     NI_MAXHOST.convert(),
                     sp.addressOf(0),
@@ -319,7 +323,8 @@ internal class IosUdpSocket : KmpUdpSocket {
         }
         if (rc != 0) {
             val msg = gai_strerror(rc)?.toKString() ?: "getnameinfo failed"
-            throw UdpException("getnameinfo error: $msg")
+            println("IosUdpSocket: getnameinfo failed (non-fatal) rc=$rc msg=$msg")
+            return@memScoped null
         }
 
         val host = hostBuf.decodeToString().trimEnd(Char(0))
