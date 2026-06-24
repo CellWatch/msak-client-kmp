@@ -231,6 +231,7 @@ class MainActivity : AppCompatActivity() {
         )
         val summary = runThroughput(cfg)
         printMsg("Result → ${summary.asText()}")
+        printMsg("  warmup: ${summary.warmupDurationMs}ms, bytes=${summary.warmupBytesTransferred}")
     }
 
 

@@ -16,6 +16,10 @@ Security.insertProviderAt(Conscrypt.newProvider(), 1)
 
 ## Setup
 
+JitPack is **not** currently used in the active CellWatch integration workflow. Current development and integration use local Maven/XCFramework publication (see Development setup below).
+
+If/when JitPack is used again, use the following setup:
+
 You can get msak-android via [jitpack.io](https://jitpack.io)'s Maven repository. First add the repository to your `settings.gradle` file:
 
 ```
@@ -121,10 +125,10 @@ Run:
 Outputs:
 
 1. Maven local cache (`~/.m2/repository`) with coordinate:
-   - `edu.gatech.cc.cellwatch:msak-client-kmp:0.2.0`
+    - `edu.gatech.cc.cellwatch:msak-client-kmp:<new-version>`
 2. Local XCFramework artifacts:
-   - `/Users/jeff/Projects/msak-android/msak-shared/build/local-dist/apple/msak-client-kmp/0.2.0/MsakShared.xcframework.zip`
-   - `/Users/jeff/Projects/msak-android/msak-shared/build/local-dist/apple/msak-client-kmp/0.2.0/MsakShared.xcframework.sha256`
+    - `/Users/jeff/Projects/msak-android/msak-shared/build/local-dist/apple/msak-client-kmp/<new-version>/MsakShared.xcframework.zip`
+    - `/Users/jeff/Projects/msak-android/msak-shared/build/local-dist/apple/msak-client-kmp/<new-version>/MsakShared.xcframework.sha256`
 
 Android/KMP consumer example:
 
@@ -142,7 +146,7 @@ dependencyResolutionManagement {
 ```kotlin
 // build.gradle(.kts)
 dependencies {
-    implementation("edu.gatech.cc.cellwatch:msak-client-kmp:0.2.0")
+    implementation("edu.gatech.cc.cellwatch:msak-client-kmp:<new-version>")
 }
 ```
 
@@ -150,6 +154,43 @@ iOS/Xcode local consumption:
 
 1. Unzip `MsakShared.xcframework.zip` to a stable local path in your consumer project.
 2. Add `MsakShared.xcframework` to Xcode target dependencies/frameworks.
+
+### Updating version and deploying locally for CellWatch (current workflow)
+
+Use this workflow when changing msak-client-kmp and testing it from CellWatch without remote publishing.
+
+1. Update the MSAK library version in this repo:
+
+    - Edit `msak-shared/build.gradle.kts`
+    - Set `version = "<new-version>"` (for example, `0.2.3`)
+
+2. Publish local artifacts from this repo:
+
+```bash
+./gradlew :msak-shared:publishLocalMavenAndXcframework
+```
+
+3. Verify local outputs match the new version:
+
+    - Maven local coordinate exists at:
+      - `~/.m2/repository/edu/gatech/cc/cellwatch/msak-client-kmp/<new-version>/`
+    - XCFramework zip/checksum exist at:
+      - `msak-shared/build/local-dist/apple/msak-client-kmp/<new-version>/`
+
+4. Update CellWatch to consume the same local version:
+
+    - Ensure CellWatch dependency resolution includes `mavenLocal()` before remote repos.
+    - Update CellWatch MSAK dependency version to `<new-version>` (for example in `gradle/libs.versions.toml`).
+    - Re-sync and rebuild CellWatch.
+
+5. If CellWatch still resolves an old artifact, refresh local caches:
+
+```bash
+./gradlew --stop
+rm -rf ~/.gradle/caches
+```
+
+Then rebuild and verify the resolved version in dependency insight/build logs.
 
 ### Remote distribution status
 

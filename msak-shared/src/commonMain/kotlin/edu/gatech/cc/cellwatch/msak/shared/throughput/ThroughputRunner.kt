@@ -64,6 +64,8 @@ data class ThroughputSummary(
     val serverUpdates: Int,
     val clientBytes: Long,
     val serverBytes: Long,
+    val warmupDurationMs: Long = 0,
+    val warmupBytesTransferred: Long = 0,
 ) {
     fun asText(): String {
         val d = when (direction) {
@@ -72,8 +74,133 @@ data class ThroughputSummary(
         }
         return "Throughput $d OK | bytes=$appBytesTotal app Mbits=${fmt2(mbits)} Mbps=${fmt2(mbps)} " +
                 "updates client=$clientUpdates server=$serverUpdates " +
+                "warmup=${warmupDurationMs}ms/${warmupBytesTransferred}B " +
                 "[client=${clientUpdates}/${fmt2(clientBytes / 1_000_000.0)}M server=${serverUpdates}/${fmt2(serverBytes / 1_000_000.0)}M]"
     }
+}
+
+internal data class ThroughputAggregation(
+    val appBytesTotal: Long,
+    val totalAppBytesTransferred: Long,
+    val clientUpdates: Int,
+    val serverUpdates: Int,
+    val clientBytes: Long,
+    val serverBytes: Long,
+    val elapsedMs: Double,
+    val warmupDurationMs: Long,
+    val warmupBytesTransferred: Long,
+)
+
+internal fun aggregateThroughputUpdates(
+    direction: ThroughputDirection,
+    streams: Int,
+    updates: Iterable<ThroughputUpdate>,
+    testStartTimeMs: Long? = null,
+): ThroughputAggregation {
+    var appBytesTotal = 0L
+    var totalAppBytesTransferred = 0L
+    var clientUpdates = 0
+    var serverUpdates = 0
+    var clientBytes = 0L
+    var serverBytes = 0L
+    val lastClient = LongArray(streams)
+    val lastServer = LongArray(streams)
+
+    var firstTsMs: Long? = null
+    var lastTsMs: Long? = null
+    var warmupBytesTransferred = 0L
+
+    for (u in updates) {
+        val app = u.measurement.Application
+        val s = u.stream
+        if (s !in 0 until streams) {
+            // Ignore out-of-range stream indices from server/client; they shouldn't happen,
+            // but guarding avoids attributing bytes to the wrong stream.
+            continue
+        }
+
+        val delta = if (u.fromServer) {
+            val cum = when (direction) {
+                ThroughputDirection.DOWNLOAD -> app.BytesSent
+                ThroughputDirection.UPLOAD -> app.BytesReceived
+            }
+            val d = (cum - lastServer[s]).coerceAtLeast(0)
+            lastServer[s] = cum
+            serverUpdates++
+            d
+        } else {
+            val cum = when (direction) {
+                ThroughputDirection.DOWNLOAD -> app.BytesReceived
+                ThroughputDirection.UPLOAD -> app.BytesSent
+            }
+            val d = (cum - lastClient[s]).coerceAtLeast(0)
+            lastClient[s] = cum
+            clientUpdates++
+            d
+        }
+
+        val t = u.time.toEpochMilliseconds()
+        if (firstTsMs == null) {
+            firstTsMs = t
+            // Bytes in the first accepted update are treated as warmup bytes because they
+            // accumulated before the summary measurement window starts.
+            warmupBytesTransferred += delta
+        } else {
+            appBytesTotal += delta
+            if (u.fromServer) {
+                serverBytes += delta
+            } else {
+                clientBytes += delta
+            }
+        }
+        totalAppBytesTransferred += delta
+        lastTsMs = t
+    }
+
+    val measuredStartMs = firstTsMs
+    val measuredEndMs = lastTsMs ?: measuredStartMs
+    val elapsedMs = when {
+        measuredStartMs == null || measuredEndMs == null -> 1.0
+        else -> max(1, (measuredEndMs - measuredStartMs).toInt()).toDouble()
+    }
+
+    val warmupDurationMs = when {
+        testStartTimeMs == null || firstTsMs == null -> 0L
+        else -> (firstTsMs - testStartTimeMs).coerceAtLeast(0L)
+    }
+
+    return ThroughputAggregation(
+        appBytesTotal = appBytesTotal,
+        totalAppBytesTransferred = totalAppBytesTransferred,
+        clientUpdates = clientUpdates,
+        serverUpdates = serverUpdates,
+        clientBytes = clientBytes,
+        serverBytes = serverBytes,
+        elapsedMs = elapsedMs,
+        warmupDurationMs = warmupDurationMs,
+        warmupBytesTransferred = warmupBytesTransferred,
+    )
+}
+
+internal fun summarizeThroughputAggregation(
+    direction: ThroughputDirection,
+    aggregation: ThroughputAggregation,
+): ThroughputSummary {
+    val mbits = (aggregation.appBytesTotal * 8.0) / 1_000_000.0
+    val mbps = mbits / (aggregation.elapsedMs / 1000.0)
+
+    return ThroughputSummary(
+        direction = direction,
+        appBytesTotal = aggregation.appBytesTotal,
+        mbits = mbits,
+        mbps = mbps,
+        clientUpdates = aggregation.clientUpdates,
+        serverUpdates = aggregation.serverUpdates,
+        clientBytes = aggregation.clientBytes,
+        serverBytes = aggregation.serverBytes,
+        warmupDurationMs = aggregation.warmupDurationMs,
+        warmupBytesTransferred = aggregation.warmupBytesTransferred,
+    )
 }
 
 
@@ -93,53 +220,17 @@ suspend fun runThroughput(config: ThroughputConfig): ThroughputSummary {
     // Register this test as the active one so UI cancel can stop it.
     ThroughputControl.register(test)
 
-    var appBytesTotal = 0L
-    var firstTs = Clock.System.now()
-    var lastTs = firstTs
-    var clientUpdates = 0
-    var serverUpdates = 0
-    var clientBytes = 0L
-    var serverBytes = 0L
-    val lastClient = LongArray(config.streams)
-    val lastServer = LongArray(config.streams)
+    val updates = ArrayList<ThroughputUpdate>(256)
 
     try {
         return withContext(Dispatchers.Default + SupervisorJob()) {
             test.start()
+            val testStartTimeMs = test.startTime?.toEpochMilliseconds() ?: Clock.System.now().toEpochMilliseconds()
             // Drain updates until completion or timeout (duration + small grace)
             try {
                 withTimeout(config.durationMs.milliseconds + 3.seconds) {
                     for (u in test.updatesChan) {
-                        val app = u.measurement.Application
-                        val s = u.stream
-                        if (s !in 0 until config.streams) {
-                            // Ignore out-of-range stream indices from server/client; they shouldn't happen,
-                            // but guarding avoids attributing bytes to the wrong stream.
-                            continue
-                        }
-                        if (u.fromServer) {
-                            val cum = when (config.direction) {
-                                ThroughputDirection.DOWNLOAD -> app.BytesSent
-                                ThroughputDirection.UPLOAD -> app.BytesReceived
-                            }
-                            val delta = (cum - lastServer[s]).coerceAtLeast(0)
-                            lastServer[s] = cum
-                            serverBytes += delta
-                            appBytesTotal += delta
-                            serverUpdates++
-                        } else {
-                            val cum = when (config.direction) {
-                                ThroughputDirection.DOWNLOAD -> app.BytesReceived
-                                ThroughputDirection.UPLOAD -> app.BytesSent
-                            }
-                            val delta = (cum - lastClient[s]).coerceAtLeast(0)
-                            lastClient[s] = cum
-                            clientBytes += delta
-                            appBytesTotal += delta
-                            clientUpdates++
-                        }
-                        if (clientUpdates + serverUpdates == 1) firstTs = u.time
-                        lastTs = u.time
+                        updates.add(u)
                     }
                 }
             } catch (t: TimeoutCancellationException) {
@@ -150,27 +241,21 @@ suspend fun runThroughput(config: ThroughputConfig): ThroughputSummary {
             test.lastError?.let { throw it }
 
             // If nothing moved at all, treat as handshake/authorization failure
-            if (appBytesTotal == 0L && clientUpdates == 0 && serverUpdates == 0) {
+            val agg = aggregateThroughputUpdates(
+                direction = config.direction,
+                streams = config.streams,
+                updates = updates,
+                testStartTimeMs = testStartTimeMs,
+            )
+
+            if (agg.totalAppBytesTransferred == 0L && agg.clientUpdates == 0 && agg.serverUpdates == 0) {
                 throw MsakException(
                     MsakErrorCode.HANDSHAKE_FAILED,
                     "No data or updates received; websocket handshake likely failed"
                 )
             }
 
-            val elapsedMs = max(1, (lastTs.toEpochMilliseconds() - firstTs.toEpochMilliseconds()).toInt()).toDouble()
-            val mbits = (appBytesTotal * 8.0) / 1_000_000.0
-            val mbps = mbits / (elapsedMs / 1000.0)
-
-            ThroughputSummary(
-                direction = config.direction,
-                appBytesTotal = appBytesTotal,
-                mbits = mbits,
-                mbps = mbps,
-                clientUpdates = clientUpdates,
-                serverUpdates = serverUpdates,
-                clientBytes = clientBytes,
-                serverBytes = serverBytes,
-            )
+            summarizeThroughputAggregation(config.direction, agg)
         }
     } catch (t: Throwable) {
         // Let coroutine cancellation bubble up unchanged; map all other failures (including timeouts) to MsakException

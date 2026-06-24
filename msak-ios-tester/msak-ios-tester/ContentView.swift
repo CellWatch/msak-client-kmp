@@ -517,6 +517,7 @@ struct ContentView: View {
                 } else {
                     let text = summary.asText()
                     appendLog("Throughput \(direction.name) OK: \(text)")
+                    appendLog("  warmup: \(summary.warmupDurationMs)ms, bytes=\(summary.warmupBytesTransferred)")
                     if direction == .download { throughputDownloadStatus = text } else { throughputUploadStatus = text }
                 }
             } catch is CancellationError {
