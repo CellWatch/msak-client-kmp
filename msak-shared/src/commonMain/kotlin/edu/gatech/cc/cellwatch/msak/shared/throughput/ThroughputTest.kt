@@ -5,6 +5,7 @@ import edu.gatech.cc.cellwatch.msak.shared.Server
 import edu.gatech.cc.cellwatch.msak.shared.net.WebSocketFactory
 import io.ktor.http.Url
 import io.ktor.http.URLParserException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -52,7 +53,7 @@ class ThroughputTest(
     private val serverEndTimeGraceMillis: Long = 5_000,
     userAgent: String? = null,
     private val wsFactory: WebSocketFactory = WebSocketFactory,
-    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+    private val scope: CoroutineScope = defaultScope(),
 ) {
     private val TAG = this::class.simpleName
     private val url = server.getThroughputUrl(direction, numStreams, duration, delay, measurementId)
@@ -60,6 +61,19 @@ class ThroughputTest(
     // Captured test-level error (non-network harness failures). The app may read this after the channel closes.
     private var error: Throwable? = null
     val lastError: Throwable? get() = error
+
+    /**
+     * First failure recorded by any stream, if any.
+     *
+     * Individual stream failures do not fail the whole run -- a measurement that
+     * still moved data is still a measurement -- but the public boundary uses
+     * this to report *why* a run that moved nothing at all failed, instead of a
+     * generic "handshake likely failed".
+     */
+    internal fun firstStreamError(): Throwable? = streams.firstNotNullOfOrNull { it.error }
+
+    // Guards finish() so cleanup happens exactly once on every terminal path.
+    private val finished = atomic(false)
 
     private val _updatesChan = Channel<ThroughputUpdate>(capacity = 32)
     val updatesChan: ReceiveChannel<ThroughputUpdate> = _updatesChan
@@ -112,7 +126,7 @@ class ThroughputTest(
         t is NullPointerException ||
         t is URLParserException
 
-    private class HarnessException(msg: String) : Exception(msg)
+    private class HarnessException(msg: String, cause: Throwable? = null) : Exception(msg, cause)
 
     /** Begin the throughput test. Monitor updates on [updatesChan] and await close for completion. */
     fun start() {
@@ -144,7 +158,7 @@ class ThroughputTest(
                         } catch (t: Throwable) {
                             // Treat infrastructure problems as harness failures; network issues get reflected by streams ending early.
                             if (isHarnessBug(t)) {
-                                error = HarnessException(t.message ?: "harness failure running stream #$i")
+                                error = HarnessException(t.message ?: "harness failure running stream #$i", t)
                             }
                             Log.e(TAG, "${Clock.System.now()} unexpected error launching stream #$i", t)
                             finish()
@@ -199,9 +213,9 @@ class ThroughputTest(
     suspend fun awaitEnd() = endSignal.await()
 
     private fun finish() {
-        if (ended) return
+        if (!finished.compareAndSet(expect = false, update = true)) return
 
-        Log.d(TAG, "${Clock.System.now()} Finishing throughput test (ended=$ended)")
+        Log.d(TAG, "${Clock.System.now()} Finishing throughput test")
 
         // Stop all streams (safe if some never started).
         streams.forEach { stream ->
@@ -224,6 +238,22 @@ class ThroughputTest(
         if (!endSignal.isCompleted) {
             endSignal.complete(Unit)
         }
+    }
+
+    private companion object {
+        /**
+         * Default detached scope. start() is not a suspend function, so nothing
+         * up the stack can catch a failure raised inside it; without a handler an
+         * unhandled exception here reaches Kotlin/Native's uncaught exception
+         * handler and terminates the host app.
+         */
+        fun defaultScope(): CoroutineScope = CoroutineScope(
+            SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, t ->
+                if (t !is CancellationException) {
+                    Log.e("ThroughputTest", "unhandled throughput coroutine failure", t)
+                }
+            }
+        )
     }
 
     private suspend fun runStream(index: Int, stream: ThroughputStream) {
@@ -250,7 +280,7 @@ class ThroughputTest(
             // Ignore cooperative cancellations/timeouts here; watchdog/finish will handle shutdown.
             val isCancellation = t is CancellationException
             if (!isCancellation && isHarnessBug(t)) {
-                error = HarnessException(t.message ?: "harness failure in stream #$index")
+                error = HarnessException(t.message ?: "harness failure in stream #$index", t)
                 Log.e(TAG, "${Clock.System.now()} unexpected error running stream #$index", t)
             } else if (!isCancellation) {
                 Log.e(TAG, "${Clock.System.now()} stream error (non-fatal): #$index", t)

@@ -155,6 +155,104 @@ iOS/Xcode local consumption:
 1. Unzip `MsakShared.xcframework.zip` to a stable local path in your consumer project.
 2. Add `MsakShared.xcframework` to Xcode target dependencies/frameworks.
 
+### iOS tester: XCFramework bootstrap
+
+`msak-ios-tester` links a generated framework:
+
+```
+msak-shared/build/XCFrameworks/Current/MsakShared.xcframework
+```
+
+That path is Gradle output and is intentionally **not** tracked in git
+(`msak-shared/.gitignore` ignores `/build`). Xcode resolves framework inputs
+before it runs any target, so a missing `Current/MsakShared.xcframework` used to
+fail the build outright:
+
+```
+error: There is no XCFramework found at '.../XCFrameworks/Current/MsakShared.xcframework'
+```
+
+even though the `msak-shared-xcframework` aggregate target exists to produce it.
+
+**How it bootstraps now.** The tracked shared scheme
+`msak-ios-tester.xcodeproj/xcshareddata/xcschemes/msak-ios-tester.xcscheme`
+carries a build **pre-action** that runs
+`msak-ios-tester/scripts/compile-kotlin-framework.sh` before Xcode resolves
+those inputs. The pre-action declares the app target as its
+`EnvironmentBuildable`, so it inherits that target's build settings — notably
+`SRCROOT` and the active `CONFIGURATION`, which is what selects the Debug or
+Release Gradle task.
+
+Consequences worth knowing:
+
+- A normal Debug or Release build of the `msak-ios-tester` scheme regenerates
+  the framework automatically, including after `rm -rf msak-shared/build`. No
+  preliminary aggregate-target build is needed.
+- The app target still depends on `msak-shared-xcframework`, so the script is
+  invoked twice per build. The script keeps a stamp at
+  `XCFrameworks/Current/.bootstrap-stamp` and skips Gradle when the published
+  framework is newer than every Kotlin source and Gradle build file, so the
+  second call is a no-op.
+- Xcode does not stream pre-action output into the build log. The script's
+  output is written to `msak-shared/build/xcframework-bootstrap.log`; read that
+  file first when a build fails with a missing or stale framework.
+- Build outputs stay untracked. Only the scheme and the scripts are committed.
+
+**Recovery path.** If the framework is missing, stale, or built for the wrong
+configuration:
+
+1. Build the `msak-ios-tester` scheme normally — this is expected to fix it.
+2. If it does not, read `msak-shared/build/xcframework-bootstrap.log`.
+3. Force a clean regeneration by hand:
+
+   ```bash
+   rm -rf msak-shared/build/XCFrameworks/Current
+   CONFIGURATION=Debug ./msak-ios-tester/scripts/compile-kotlin-framework.sh
+   ```
+
+4. The aggregate scheme is still available as a manual escape hatch:
+
+   ```bash
+   xcodebuild -project msak-ios-tester/msak-ios-tester.xcodeproj \
+     -scheme msak-shared-xcframework -configuration Debug build
+   ```
+
+**Automated verification.** `msak-ios-tester/scripts/verify-xcframework-bootstrap.sh`
+deletes `msak-shared/build` outright, builds the normal tester scheme, and fails
+unless the build succeeds *and* the framework was regenerated:
+
+```bash
+./msak-ios-tester/scripts/verify-xcframework-bootstrap.sh Debug
+./msak-ios-tester/scripts/verify-xcframework-bootstrap.sh Release
+```
+
+### iOS error handling: failures are structured, not fatal
+
+`runLatency()` and `runThroughput()` are the only structured error boundary.
+Everything inside — `LatencyTest`, `ThroughputTest`, `ThroughputStream` and the
+platform WebSocket adapters — runs in detached `SupervisorJob` scopes that
+**record** failures instead of rethrowing them. On Kotlin/Native a rethrow from
+a detached scope reaches the runtime's unhandled-exception hook, which is how a
+failed measurement could make the host app exit with no visible error.
+
+What callers can rely on:
+
+- Network, authorization, timeout, WebSocket, parsing, socket and internal
+  lifecycle failures all surface as a thrown `MsakException` from those two
+  suspend functions, with the underlying error kept as `cause`.
+- Cancellation stays cancellation: `CancellationException` propagates unchanged
+  and is never re-reported as `MsakErrorCode.UNKNOWN`.
+- `MsakErrorCode` is deliberately not extended, so an exhaustive Swift `switch`
+  in a consumer keeps compiling.
+
+On iOS specifically, `NSURLSessionWebSocketTask.sendMessage` completion errors
+are no longer discarded. Data sends stay pipelined (up to 8 outstanding per
+socket) because awaiting each one halved upload throughput in local testing
+(16.8 -> 8.6 Gbit/s over loopback); a completion error is recorded, terminates
+the socket, and is rethrown on the next send. Session callbacks also run on a
+dedicated queue rather than `NSOperationQueue.mainQueue`, where a blocked main
+thread could hide receive errors entirely.
+
 ### Updating version and deploying locally for CellWatch (current workflow)
 
 Use this workflow when changing msak-client-kmp and testing it from CellWatch without remote publishing.

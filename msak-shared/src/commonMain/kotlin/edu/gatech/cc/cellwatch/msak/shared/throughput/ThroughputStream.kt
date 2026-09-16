@@ -12,6 +12,7 @@ import edu.gatech.cc.cellwatch.msak.shared.THROUGHPUT_AVG_MEASUREMENT_INTERVAL_M
 import edu.gatech.cc.cellwatch.msak.shared.THROUGHPUT_MAX_MEASUREMENT_INTERVAL_MILLIS
 import edu.gatech.cc.cellwatch.msak.shared.THROUGHPUT_MIN_MEASUREMENT_INTERVAL_MILLIS
 import kotlinx.atomicfu.atomic
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Dispatchers
@@ -63,8 +64,21 @@ class ThroughputStream(
     private val streamsHint: Int? = null,
 ) {
     private val logTAG = "${this::class.simpleName} #$id"
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    // Detached scope: start() is not a suspend function, so nothing up the call
+    // stack can catch a failure here. On Kotlin/Native an unhandled exception in
+    // this scope reaches the platform's uncaught handler and kills the app, so
+    // the handler below turns it into stream failure state instead.
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, t ->
+            if (t !is CancellationException) {
+                Log.d(logTAG, "unhandled stream coroutine failure", t)
+                finish(FailureException(t))
+            }
+        }
+    )
     private val started = atomic(false)
+    private val finished = atomic(false)
 
     private var ws: KmpWebSocket? = null
     private val _updatesChan = Channel<ThroughputUpdate>(capacity = 32)
@@ -78,6 +92,12 @@ class ThroughputStream(
     val isStarted get() = started.value
     val ended get() = endTime != null
     var error: Throwable? = null; private set
+
+    /** First send-side failure seen on this stream, if any. */
+    private val sendFailure = atomic<Throwable?>(null)
+
+    /** Set once a close has been requested locally, so teardown happens once. */
+    private val closeRequested = atomic(false)
 
     // Application-layer counters
     private val appBytesSent = atomic(0L)
@@ -192,7 +212,7 @@ class ThroughputStream(
                         finish(null)
                     } else {
                         Log.d(logTAG, "websocket receive loop failed for ${finalUrl}", t)
-                        finish(FailureException())
+                        finish(FailureException(t))
                     }
                 }
             } catch (t: Throwable) {
@@ -201,7 +221,7 @@ class ThroughputStream(
                     finish(null)
                 } else {
                     Log.d(logTAG, "websocket connect failed for ${finalUrl}", t)
-                    finish(FailureException())
+                    finish(FailureException(t))
                 }
             }
         }
@@ -210,10 +230,12 @@ class ThroughputStream(
     fun stop() {
         if (!isStarted && !ended) throw NotStartedException()
 
+        closeRequested.value = true
         val socket = ws
         // Graceful WebSocket close uses the suspending API. Run it in a scope
-        // that is not cancelled by finish() (which cancels this.stream scope).
-        CoroutineScope(Dispatchers.Default).launch {
+        // that outlives finish() (which cancels this stream's scope) but is still
+        // supervised, so a close failure cannot reach the uncaught handler.
+        closeScope.launch {
             runCatching { socket?.close(1000, "stream stopped") }
                 .onFailure { Log.d(logTAG, "graceful websocket close failed", it) }
         }
@@ -237,6 +259,10 @@ class ThroughputStream(
             true
         }.getOrElse {
             Log.d(logTAG, "unable to send measurement", it)
+            // A measurement send that fails while the test is still live is real
+            // failure state, not noise. Record it (so the boundary can report it)
+            // but do not end the stream: data may still be flowing.
+            recordSendFailure(it)
             false
         }
         if (ok) sendUpdate(ThroughputUpdate(false, id, Clock.System.now(), m))
@@ -248,15 +274,22 @@ class ThroughputStream(
         var payload = Random.nextBytes(size)
         while (!ended) {
             val socket = ws ?: break
-            val sentOk = runCatching {
+            val sendError = runCatching {
                 // Suspends; throws on failure
                 socket.sendBinary(payload)
-                true
-            }.getOrElse {
-                Log.d(logTAG, "sendBinary failed", it)
-                false
+                null
+            }.getOrElse { it }
+            if (sendError != null) {
+                Log.d(logTAG, "sendBinary failed", sendError)
+                // An upload stream that cannot send has failed: there is no way
+                // to make further progress. Turn it into terminal failure state
+                // unless we are already shutting down.
+                if (!ended && !closeRequested.value && sendError !is CancellationException) {
+                    recordSendFailure(sendError)
+                    finish(FailureException(sendError))
+                }
+                break
             }
-            if (!sentOk) break
 
             appBytesSent.addAndGet(payload.size.toLong())
 
@@ -287,17 +320,56 @@ class ThroughputStream(
         }
     }
 
+    /**
+     * Terminal cleanup. Guarded so that every path -- normal close, receive
+     * failure, send failure, cancellation, stop() -- closes the updates channel
+     * and releases the socket exactly once.
+     */
     private fun finish(err: Throwable? = null) {
-        if (ended) return
+        if (!finished.compareAndSet(expect = false, update = true)) return
         Log.d(logTAG, "finishing stream (err=${err?.let { it::class.simpleName } ?: "none"})")
         endTime = Clock.System.now()
         ticker.stop()
-        error = err
+        // Prefer an explicit terminal error; otherwise fall back to a recorded
+        // send failure so a send-side problem is not lost.
+        error = err ?: sendFailure.value?.let { FailureException(it) }
         _updatesChan.close()
+        if (!closeRequested.value) {
+            // finish() can be reached without stop() (e.g. the server closed on us
+            // or a receive failed). Release the socket exactly once here.
+            closeRequested.value = true
+            val socket = ws
+            closeScope.launch {
+                runCatching { socket?.close(1000, "stream finished") }
+                    .onFailure { Log.d(logTAG, "websocket close on finish failed", it) }
+            }
+        }
         runCatching { scope.cancel() }
+    }
+
+    /** Record the first send failure. Visible to the boundary via [error]. */
+    private fun recordSendFailure(t: Throwable) {
+        if (t is CancellationException) return
+        if (!sendFailure.compareAndSet(null, t)) {
+            Log.d(logTAG, "additional send failure ignored: ${t::class.simpleName}")
+        }
     }
 
     class NotStartedException: Exception("not started")
     class UnexpectedCloseException(code: Int, reason: String?): Exception("websocket closed with unexpected code: $code $reason")
-    class FailureException : Exception("websocket failure")
+    class FailureException(cause: Throwable? = null):
+        Exception("websocket failure" + (cause?.message?.let { ": $it" } ?: ""), cause)
+
+    companion object {
+        /**
+         * Shared, supervised scope for graceful socket teardown. It must outlive
+         * each stream's own scope (finish() cancels that one) while still keeping
+         * close failures away from the uncaught exception handler.
+         */
+        private val closeScope = CoroutineScope(
+            SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, t ->
+                Log.d("ThroughputStream", "websocket teardown failure", t)
+            }
+        )
+    }
 }

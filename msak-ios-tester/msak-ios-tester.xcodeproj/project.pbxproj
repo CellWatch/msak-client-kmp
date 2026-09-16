@@ -22,6 +22,7 @@
 
 /* Begin PBXBuildFile section */
 		1F4AC3442E6A2A8400980EE9 /* MsakShared.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1F4AC3432E6A2A8400980EE9 /* MsakShared.xcframework */; };
+		1FA17E012E6A2A8400980EE9 /* MsakShared.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1F4AC3432E6A2A8400980EE9 /* MsakShared.xcframework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -99,6 +100,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1FA17E012E6A2A8400980EE9 /* MsakShared.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -215,9 +217,6 @@
 				LastSwiftUpdateCheck = 1640;
 				LastUpgradeCheck = 1640;
 				TargetAttributes = {
-				E53D9502C2914A828E30CC17 = {
-					CreatedOnToolsVersion = 16.4;
-				};
 					1F70C0BA2E671A5000A7FC72 = {
 						CreatedOnToolsVersion = 16.4;
 					};
@@ -228,6 +227,9 @@
 					1F70C0D22E671A5200A7FC72 = {
 						CreatedOnToolsVersion = 16.4;
 						TestTargetID = 1F70C0BA2E671A5000A7FC72;
+					};
+					E53D9502C2914A828E30CC17 = {
+						CreatedOnToolsVersion = 16.4;
 					};
 				};
 			};
@@ -342,6 +344,12 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		1ECB988A445C4B1AA2828ED7 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+			};
+			name = Release;
+		};
 		1F70C0DB2E671A5200A7FC72 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -627,12 +635,6 @@
 			buildSettings = {
 			};
 			name = Debug;
-		};
-		1ECB988A445C4B1AA2828ED7 /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-			};
-			name = Release;
 		};
 /* End XCBuildConfiguration section */
 

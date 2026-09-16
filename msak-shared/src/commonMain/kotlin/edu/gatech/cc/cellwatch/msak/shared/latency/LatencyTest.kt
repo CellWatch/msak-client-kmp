@@ -22,8 +22,11 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.decodeFromString
 import kotlin.time.Duration.Companion.milliseconds
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.atomicfu.atomic
 
 import edu.gatech.cc.cellwatch.msak.shared.Log
 import edu.gatech.cc.cellwatch.msak.shared.LATENCY_CHARSET
@@ -59,10 +62,25 @@ class LatencyTest(
 ) {
     private val TAG = this::class.simpleName
 
-    // Lifecycle management for background work
-    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    // Lifecycle management for background work.
+    //
+    // This scope is detached from the caller on purpose (start() is not a suspend
+    // function). That makes an uncaught exception here fatal on Kotlin/Native, so
+    // the scope carries a handler and nothing inside ever rethrows: failures are
+    // recorded and surfaced by runLatency(), the structured error boundary.
+    private val scope = CoroutineScope(
+        Dispatchers.Default + SupervisorJob() + CoroutineExceptionHandler { _, t ->
+            recordFailure(t)
+        }
+    )
     private var job: Job? = null
     private var activeSocket: KmpUdpSocket? = null
+
+    // Terminal state, written exactly once.
+    private val failure = atomic<Throwable?>(null)
+    private val wasCancelled = atomic(false)
+    private val finished = atomic(false)
+    private val endSignal = CompletableDeferred<Unit>()
 
     // Control-plane endpoints
     private val authorizeUrl = server.getLatencyAuthorizeUrl(measurementId)
@@ -88,9 +106,16 @@ class LatencyTest(
 
     // Result / error after completion
     var result: LatencyResult? = null
-    var error: Throwable? = null
+        private set
+
+    /** First non-cancellation failure recorded by the test, if any. */
+    val error: Throwable? get() = failure.value
+
     /** Mirror ThroughputTest: expose the most recent error via a stable name. */
     val lastError: Throwable? get() = error
+
+    /** True if the test stopped because it was cancelled rather than because it failed. */
+    val cancelled: Boolean get() = wasCancelled.value
 
     // Hostname resolved from the authorize URL
     val serverHost: String = Url(authorizeUrl).host
@@ -99,7 +124,7 @@ class LatencyTest(
      * Begin the latency test asynchronously. Collect updates on [updatesChan] until it closes.
      */
     fun start() {
-        if (started) error("already started")
+        if (started) throw IllegalStateException("already started")
         started = true
         job = scope.launch {
             try {
@@ -108,27 +133,36 @@ class LatencyTest(
                 if (t is CancellationException) {
                     // Treat cancellation as a normal shutdown; do not mark as error.
                     Log.i(TAG, "latency test cancelled")
+                    wasCancelled.value = true
                 } else {
                     Log.i(TAG, "latency test error", t)
-                    error = t
+                    recordFailure(t)
                 }
-                throw t
+                // Deliberately NOT rethrown. This coroutine has no caller to catch
+                // it: on Kotlin/Native a rethrow here reaches the uncaught exception
+                // handler and terminates the host app. runLatency() reads
+                // [error]/[cancelled] after the updates channel closes instead.
             } finally {
                 finish()
-                _updatesChan.close()
             }
         }
         // Ensure any pending socket read is unblocked on completion
         job?.invokeOnCompletion { runCatching { activeSocket?.close() } }
     }
 
-    /** Abort early. */
+    /** Abort early. Idempotent and safe to call before [start]. */
     fun stop() {
-        if (!started) error("can't stop before starting")
+        // runLatency() calls stop() in its finally block even on success, so only
+        // mark a cancellation when the test had not already reached a terminal state.
+        if (!finished.value) wasCancelled.value = true
         // Closing the socket unblocks a pending receive on native targets.
         activeSocket?.let { runCatching { it.close() } }
         job?.cancel()
+        if (!started) finish()
     }
+
+    /** Suspend until the test has fully ended and released its resources. */
+    suspend fun awaitEnd() = endSignal.await()
 
     // Core flow
     private suspend fun run() = withContext(Dispatchers.Default) {
@@ -150,8 +184,9 @@ class LatencyTest(
             Log.d(TAG, "connecting UDP → host=$serverHost port=$resolvedPort")
             sock.connect(serverHost, resolvedPort)
         } catch (t: Throwable) {
+            if (t is CancellationException) throw t
             Log.i(TAG, "UDP connect failed", t)
-            throw InitialPacketTimeoutException()
+            throw InitialPacketTimeoutException(t)
         }
 
         try {
@@ -164,9 +199,28 @@ class LatencyTest(
         }
     }
 
+    /**
+     * Terminal cleanup. Runs exactly once no matter which path ends the test
+     * (success, failure, cancellation, or stop() before start()).
+     */
     private fun finish() {
-        if (ended) return
+        if (!finished.compareAndSet(expect = false, update = true)) return
         endTime = Clock.System.now()
+        activeSocket?.let { runCatching { it.close() } }
+        activeSocket = null
+        _updatesChan.close()
+        endSignal.complete(Unit)
+    }
+
+    /** Record the first non-cancellation failure; later ones are logged only. */
+    private fun recordFailure(t: Throwable) {
+        if (t is CancellationException) {
+            wasCancelled.value = true
+            return
+        }
+        if (!failure.compareAndSet(null, t)) {
+            Log.d(TAG, "additional latency failure ignored: ${t::class.simpleName}: ${t.message}")
+        }
     }
 
     private fun recordUpdate(update: LatencyUpdate) {
@@ -194,8 +248,9 @@ class LatencyTest(
                 }
             }
         } catch (t: Throwable) {
+            if (t is CancellationException) throw t
             Log.e(TAG, "authorize: HTTP request failed", t)
-            throw AuthorizeFailureExecption()
+            throw AuthorizeFailureExecption(t)
         }
 
         val status = resp.status.value
@@ -204,29 +259,35 @@ class LatencyTest(
         if (status !in 200..299) {
             val hdrs = try { resp.headers.entries().joinToString { (k,v) -> "$k=${v.joinToString()}" } } catch (_: Throwable) { "<no headers>" }
             Log.e(TAG, "authorize: non-2xx status $status; headers=[$hdrs]; body='${body.take(200)}'")
-            throw UnauthorizedException()
+            throw UnauthorizedException("authorize call returned HTTP $status")
         }
         if (body.isBlank()) {
             Log.e(TAG, "authorize: empty response body from $authorizeUrl")
-            throw UnauthorizedException()
+            throw UnauthorizedException("authorize call returned an empty body")
         }
 
         return try {
             json.decodeFromString<LatencyAuthorization>(body)
         } catch (e: SerializationException) {
             Log.e(TAG, "authorize: JSON decode failed; body='${body.take(200)}'", e)
-            throw UnauthorizedException()
+            throw UnauthorizedException("authorize response was not valid JSON", e)
         }
     }
 
     private suspend fun getResult(): LatencyResult {
         val client = ensureHttp()
-        val text = client.get(resultUrl).bodyAsText()
+        val text = try {
+            client.get(resultUrl).bodyAsText()
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            Log.e(TAG, "results: HTTP request failed", t)
+            throw ResultFailureException(t)
+        }
         return try {
             json.decodeFromString<LatencyResult>(text)
         } catch (e: SerializationException) {
             Log.e(TAG, "results: JSON decode failed; body='$text'", e)
-            throw NoResultException()
+            throw NoResultException(e)
         }
     }
 
@@ -350,10 +411,18 @@ class LatencyTest(
     }
 
     // ----- Exceptions matching previous semantics -----
-    class AuthorizeFailureExecption: Exception("authorize call failed")
-    class UnauthorizedException: Exception("authorize call returned bad response")
-    class ResultFailureException: Exception("result call failed")
-    class NoResultException: Exception("result call returned bad response")
-    class InitialPacketTimeoutException: Exception("initial packet timeout")
-    class NoAddrException: Exception("could not resolve server addr")
+    class AuthorizeFailureExecption(cause: Throwable? = null):
+        Exception("authorize call failed", cause)
+    class UnauthorizedException(
+        message: String = "authorize call returned bad response",
+        cause: Throwable? = null,
+    ): Exception(message, cause)
+    class ResultFailureException(cause: Throwable? = null):
+        Exception("result call failed", cause)
+    class NoResultException(cause: Throwable? = null):
+        Exception("result call returned bad response", cause)
+    class InitialPacketTimeoutException(cause: Throwable? = null):
+        Exception("initial packet timeout", cause)
+    class NoAddrException(cause: Throwable? = null):
+        Exception("could not resolve server addr", cause)
 }

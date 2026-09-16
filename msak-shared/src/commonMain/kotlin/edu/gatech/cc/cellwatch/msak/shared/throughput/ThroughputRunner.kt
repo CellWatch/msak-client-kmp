@@ -7,30 +7,15 @@ import kotlinx.datetime.Clock
 import kotlin.math.max
 import kotlin.math.roundToLong
 
+import edu.gatech.cc.cellwatch.msak.shared.mapToMsakException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
-import io.ktor.util.network.UnresolvedAddressException
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
-
-private fun mapThrowable(t: Throwable): MsakException = when (t) {
-    is io.ktor.http.URLParserException ->
-        MsakException(MsakErrorCode.INVALID_URL, "Invalid URL", t)
-    is kotlinx.serialization.SerializationException ->
-        MsakException(MsakErrorCode.BAD_JSON, "Bad JSON", t)
-    is kotlinx.coroutines.TimeoutCancellationException ->
-        MsakException(MsakErrorCode.TIMEOUT, "Timed out", t)
-    is UnresolvedAddressException ->
-        MsakException(MsakErrorCode.DNS, "DNS resolution failed", t)
-    is CancellationException ->
-        MsakException(MsakErrorCode.CANCELED, "Canceled", t)
-    else -> MsakException(MsakErrorCode.UNKNOWN, t.message ?: "Unknown error", t)
-}
 
 private fun fmt2(v: Double): String {
     val rounded = (v * 100.0).roundToLong() / 100.0
@@ -223,7 +208,11 @@ suspend fun runThroughput(config: ThroughputConfig): ThroughputSummary {
     val updates = ArrayList<ThroughputUpdate>(256)
 
     try {
-        return withContext(Dispatchers.Default + SupervisorJob()) {
+        // NOTE: no SupervisorJob() here. Passing a Job to withContext reparents the
+        // block and silently detaches it from the caller's cancellation. The
+        // detached machinery inside ThroughputTest/ThroughputStream records its own
+        // failures instead of rethrowing, so no supervision is needed at this level.
+        return withContext(Dispatchers.Default) {
             test.start()
             val testStartTimeMs = test.startTime?.toEpochMilliseconds() ?: Clock.System.now().toEpochMilliseconds()
             // Drain updates until completion or timeout (duration + small grace)
@@ -249,10 +238,21 @@ suspend fun runThroughput(config: ThroughputConfig): ThroughputSummary {
             )
 
             if (agg.totalAppBytesTransferred == 0L && agg.clientUpdates == 0 && agg.serverUpdates == 0) {
-                throw MsakException(
-                    MsakErrorCode.HANDSHAKE_FAILED,
-                    "No data or updates received; websocket handshake likely failed"
-                )
+                // Nothing moved at all. If a stream recorded why (connect refused,
+                // TLS failure, send/receive error), report that rather than a
+                // generic guess.
+                val streamError = test.firstStreamError()
+                throw if (streamError != null) {
+                    mapToMsakException(
+                        streamError,
+                        "No data or updates received; websocket session failed"
+                    )
+                } else {
+                    MsakException(
+                        MsakErrorCode.HANDSHAKE_FAILED,
+                        "No data or updates received; websocket handshake likely failed"
+                    )
+                }
             }
 
             summarizeThroughputAggregation(config.direction, agg)
@@ -261,7 +261,7 @@ suspend fun runThroughput(config: ThroughputConfig): ThroughputSummary {
         // Let coroutine cancellation bubble up unchanged; map all other failures (including timeouts) to MsakException
         if (t is CancellationException) throw t
         if (t is MsakException) throw t
-        throw mapThrowable(t)
+        throw mapToMsakException(t, "throughput failed")
     } finally {
         // Clear active test registration regardless of outcome
         ThroughputControl.clear(test)

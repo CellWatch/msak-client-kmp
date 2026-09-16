@@ -15,9 +15,8 @@ import kotlin.math.roundToLong
 
 import edu.gatech.cc.cellwatch.msak.shared.MsakException
 import edu.gatech.cc.cellwatch.msak.shared.MsakErrorCode
+import edu.gatech.cc.cellwatch.msak.shared.mapToMsakException
 import kotlin.coroutines.cancellation.CancellationException
-import edu.gatech.cc.cellwatch.msak.shared.net.UdpException
-import kotlinx.coroutines.CoroutineExceptionHandler
 
 /**
  * Configuration for a latency measurement run.
@@ -104,41 +103,35 @@ suspend fun runLatency(config: LatencyConfig): LatencySummary {
         userAgent = config.userAgent,
     )
     try {
-        // Suppress child coroutine exceptions (e.g., recvfrom() errors on socket close) so they
-        // don't bubble to the platform's "uncaught exception" handler on iOS.
-        val handler = CoroutineExceptionHandler { _, e ->
-            when (e) {
-                is CancellationException -> {
-                    // Expected on user cancel; ignore.
-                }
-                is UdpException -> {
-                    // Common during stop(): socket closes while a blocking recv() is in-flight.
-                    // LatencyTest will record/set lastError (or not) and we surface below; no crash.
-                }
-                else -> {
-                    // Leave other errors to be surfaced via test.lastError; don't rethrow here.
-                }
-            }
-        }
-        withContext(Dispatchers.Default + SupervisorJob() + handler) {
+        // NOTE: no SupervisorJob() here. Passing a Job to withContext reparents the
+        // block, which silently detaches it from the caller's cancellation. The
+        // detached machinery inside LatencyTest records its own failures rather
+        // than rethrowing, so no supervision is needed at this level.
+        val drained = withContext(Dispatchers.Default) {
             LatencyControl.register(test)
             test.start()
             withTimeoutOrNull(config.duration.milliseconds + 3.seconds) {
                 for (u in test.updatesChan) {
                     // optional: forward to logs or a callback
                 }
+                true
             }
         }
 
-        // Surface any recorded error, mapping to MsakException if needed
+        // Surface any recorded error, mapping to MsakException if needed.
         test.lastError?.let { err ->
-            when (err) {
-                is MsakException -> throw err
-                is CancellationException -> throw err
-                else -> throw MsakException(MsakErrorCode.UNKNOWN, "latency failed", err)
-            }
+            if (err is CancellationException) throw err
+            throw mapToMsakException(err, "latency failed")
         }
-        val res = test.result ?: throw MsakException(MsakErrorCode.UNKNOWN, "no latency result")
+        if (drained == null) {
+            // The test never closed its updates channel inside the run window.
+            throw MsakException(
+                MsakErrorCode.TIMEOUT,
+                "latency test did not complete within ${config.duration + 3_000}ms"
+            )
+        }
+        val res = test.result
+            ?: throw MsakException(MsakErrorCode.UNKNOWN, "no latency result")
 
         val rtts = res.RoundTrips.mapNotNull { it.rttUs }
         val mean = rtts.takeIf { it.isNotEmpty() }?.average()?.div(1000.0)
@@ -179,6 +172,10 @@ fun latencyFlow(config: LatencyConfig): Flow<LatencyUpdate> = channelFlow {
         LatencyControl.register(test)
         test.start()
         for (u in test.updatesChan) send(u)
+        // LatencyTest never rethrows from its detached scope, so a failure would
+        // otherwise look like a normal end-of-stream. Surface it structurally:
+        // this throw happens inside channelFlow, so the collector sees it.
+        test.lastError?.let { throw mapToMsakException(it, "latency failed") }
     }
     awaitClose {
         // Ensure the sender coroutine is cancelled when the collector stops.
@@ -186,6 +183,5 @@ fun latencyFlow(config: LatencyConfig): Flow<LatencyUpdate> = channelFlow {
         // Ensure UDP/socket resources are released even if the job was already done.
         runCatching { test.stop() }
         LatencyControl.clear(test)
-        // We don't throw from flows; the LatencyTest will have logged any errors.
     }
 }

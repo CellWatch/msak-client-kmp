@@ -15,6 +15,15 @@ sealed interface WsMessage {
     data class Binary(val bytes: ByteArray) : WsMessage
 }
 
+/**
+ * Structured WebSocket failure.
+ *
+ * Platform adapters raise this instead of dropping the underlying error, so a
+ * failed send or receive becomes observable test state rather than silence.
+ * [cause] carries the platform error when one is available.
+ */
+class WebSocketException(message: String, cause: Throwable? = null) : Exception(message, cause)
+
 interface KmpWebSocket : AutoCloseable {
     /** Stream of incoming messages; completes when the socket closes. */
     val incoming: Flow<WsMessage>

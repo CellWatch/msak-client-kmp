@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Scheme
+   LastUpgradeVersion = "2630"
+   version = "1.7">
+   <BuildAction
+      parallelizeBuildables = "YES"
+      buildImplicitDependencies = "YES"
+      buildArchitectures = "Automatic">
+      <PreActions>
+         <ExecutionAction
+            ActionType = "Xcode.IDEStandardExecutionActionsCore.ExecutionActionType.ShellScriptAction">
+            <ActionContent
+               title = "Bootstrap MsakShared.xcframework"
+               scriptText = "# Regenerate msak-shared/build/XCFrameworks/Current/MsakShared.xcframework&#10;# BEFORE Xcode resolves the app target&apos;s framework inputs, so the build&#10;# works from a clean tree (e.g. after `rm -rf msak-shared/build`).&#10;set -o pipefail&#10;mkdir -p &quot;${SRCROOT}/../msak-shared/build&quot;&#10;&quot;${SRCROOT}/scripts/compile-kotlin-framework.sh&quot; 2&gt;&amp;1 | tee &quot;${SRCROOT}/../msak-shared/build/xcframework-bootstrap.log&quot;&#10;">
+               <EnvironmentBuildable>
+                  <BuildableReference
+                     BuildableIdentifier = "primary"
+                     BlueprintIdentifier = "1F70C0BA2E671A5000A7FC72"
+                     BuildableName = "msak-ios-tester.app"
+                     BlueprintName = "msak-ios-tester"
+                     ReferencedContainer = "container:msak-ios-tester.xcodeproj">
+                  </BuildableReference>
+               </EnvironmentBuildable>
+            </ActionContent>
+         </ExecutionAction>
+      </PreActions>
+      <BuildActionEntries>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "1F70C0BA2E671A5000A7FC72"
+               BuildableName = "msak-ios-tester.app"
+               BlueprintName = "msak-ios-tester"
+               ReferencedContainer = "container:msak-ios-tester.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+      </BuildActionEntries>
+   </BuildAction>
+   <TestAction
+      buildConfiguration = "Debug"
+      selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
+      selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
+      shouldUseLaunchSchemeArgsEnv = "YES"
+      shouldAutocreateTestPlan = "YES">
+      <Testables>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "1F70C0C82E671A5200A7FC72"
+               BuildableName = "msak-ios-testerTests.xctest"
+               BlueprintName = "msak-ios-testerTests"
+               ReferencedContainer = "container:msak-ios-tester.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "1F70C0D22E671A5200A7FC72"
+               BuildableName = "msak-ios-testerUITests.xctest"
+               BlueprintName = "msak-ios-testerUITests"
+               ReferencedContainer = "container:msak-ios-tester.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
+      </Testables>
+   </TestAction>
+   <LaunchAction
+      buildConfiguration = "Debug"
+      selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
+      selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
+      launchStyle = "0"
+      useCustomWorkingDirectory = "NO"
+      ignoresPersistentStateOnLaunch = "NO"
+      debugDocumentVersioning = "YES"
+      debugServiceExtension = "internal"
+      allowLocationSimulation = "YES">
+      <BuildableProductRunnable
+         runnableDebuggingMode = "0">
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "1F70C0BA2E671A5000A7FC72"
+            BuildableName = "msak-ios-tester.app"
+            BlueprintName = "msak-ios-tester"
+            ReferencedContainer = "container:msak-ios-tester.xcodeproj">
+         </BuildableReference>
+      </BuildableProductRunnable>
+   </LaunchAction>
+   <ProfileAction
+      buildConfiguration = "Release"
+      shouldUseLaunchSchemeArgsEnv = "YES"
+      savedToolIdentifier = ""
+      useCustomWorkingDirectory = "NO"
+      debugDocumentVersioning = "YES">
+      <BuildableProductRunnable
+         runnableDebuggingMode = "0">
+         <BuildableReference
+            BuildableIdentifier = "primary"
+            BlueprintIdentifier = "1F70C0BA2E671A5000A7FC72"
+            BuildableName = "msak-ios-tester.app"
+            BlueprintName = "msak-ios-tester"
+            ReferencedContainer = "container:msak-ios-tester.xcodeproj">
+         </BuildableReference>
+      </BuildableProductRunnable>
+   </ProfileAction>
+   <AnalyzeAction
+      buildConfiguration = "Debug">
+   </AnalyzeAction>
+   <ArchiveAction
+      buildConfiguration = "Release"
+      revealArchiveInOrganizer = "YES">
+   </ArchiveAction>
+</Scheme>
