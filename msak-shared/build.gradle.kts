@@ -12,7 +12,7 @@ plugins {
 }
 
 group = "edu.gatech.cc.cellwatch"
-version = "0.2.3"
+version = "0.3.0"
 
 kotlin {
 
