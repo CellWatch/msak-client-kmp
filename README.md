@@ -155,6 +155,61 @@ iOS/Xcode local consumption:
 1. Unzip `MsakShared.xcframework.zip` to a stable local path in your consumer project.
 2. Add `MsakShared.xcframework` to Xcode target dependencies/frameworks.
 
+### Running a local MSAK server for testing
+
+The repo ships `scripts/ensure-msak-docker.sh`, which builds and runs a local
+MSAK server fixture. It expects the MSAK server source (which contains the
+`Dockerfile`) next to this repo:
+
+```
+MSAK_DIR=../msak      # i.e. ~/Projects/msak
+HOST_HTTP_PORT=8080   # cleartext HTTP/WS
+HOST_UDP_PORT=1053    # UDP latency
+```
+
+```bash
+./scripts/ensure-msak-docker.sh
+```
+
+`scripts/run-android-docker-throughput-test.sh` wraps that and then runs the
+Android instrumented throughput test against it.
+
+**Without Docker.** The server is a Go binary, so a local run needs no Docker
+daemon at all:
+
+```bash
+cd ~/Projects/msak && go build -o /tmp/msak-server ./cmd/msak-server
+mkdir -p /tmp/msakdata
+/tmp/msak-server -datadir /tmp/msakdata -ws_addr :8080 -latency_addr :1053
+```
+
+Both forms listen on all interfaces, so the same server serves the simulator and
+a physical device.
+
+#### Pointing a client at it
+
+| Client | Host to enter |
+|---|---|
+| iOS Simulator | `127.0.0.1:8080` |
+| Android emulator | `10.0.2.2:8080` |
+| Physical iPhone / Android device | your Mac's LAN address, e.g. `192.168.1.119:8080` |
+
+**A physical device cannot use `127.0.0.1`** — on the phone that is the phone
+itself, so the measurement fails against a server that is not there. Use the
+Mac's LAN IP (`ipconfig getifaddr en0`), keep the phone on the same network, and
+allow incoming connections for the server binary in the macOS firewall.
+
+The iOS tester's `Host` field accepts `host[:port]` and defaults to port 8080
+(443 with TLS on). The UDP latency port is fixed at 1053.
+
+#### Public (M-Lab) servers
+
+The iOS tester does not have a local/public toggle. It has two **Locate**
+buttons next to the `Host` field — one for latency, one for throughput — which
+query the M-Lab Locate API, pick a nearby server, and switch the tester to that
+server's URLs verbatim (including the `access_token`). Editing `Host` by hand
+switches back to local/dev mode.
+
 ### iOS tester: XCFramework bootstrap
 
 `msak-ios-tester` links a generated framework:
