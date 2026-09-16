@@ -114,7 +114,8 @@ msak-android is an Android Studio project.
 Local distribution supports:
 
 1. Maven local cache publication for Android/KMP consumers.
-2. Local XCFramework zip + checksum output for iOS/Xcode consumers.
+2. Local XCFramework zip + checksum output for iOS/Xcode consumers, in **both
+   Debug and Release**.
 
 Run:
 
@@ -126,9 +127,16 @@ Outputs:
 
 1. Maven local cache (`~/.m2/repository`) with coordinate:
     - `edu.gatech.cc.cellwatch:msak-client-kmp:<new-version>`
-2. Local XCFramework artifacts:
-    - `/Users/jeff/Projects/msak-android/msak-shared/build/local-dist/apple/msak-client-kmp/<new-version>/MsakShared.xcframework.zip`
-    - `/Users/jeff/Projects/msak-android/msak-shared/build/local-dist/apple/msak-client-kmp/<new-version>/MsakShared.xcframework.sha256`
+2. Local XCFramework artifacts, under
+   `msak-shared/build/local-dist/apple/msak-client-kmp/<new-version>/`:
+    - `MsakShared-debug.xcframework.zip` + `MsakShared-debug.xcframework.sha256`
+    - `MsakShared-release.xcframework.zip` + `MsakShared-release.xcframework.sha256`
+
+To build just one configuration:
+
+```bash
+./gradlew :msak-shared:zipLocalReleaseXcframework :msak-shared:writeLocalReleaseXcframeworkSha256
+```
 
 Android/KMP consumer example:
 
@@ -150,10 +158,46 @@ dependencies {
 }
 ```
 
+#### Debug vs Release XCFrameworks
+
+**Pick the zip that matches what you are shipping.** Unlike the published `.klib`
+artifacts -- where the consumer links the framework itself and picks its own
+configuration -- these zips are pre-linked, so the configuration is baked in:
+
+| Zip | Use for |
+|---|---|
+| `MsakShared-release.xcframework.zip` | TestFlight, App Store, any release build |
+| `MsakShared-debug.xcframework.zip` | Local development and debugging |
+
+A debug Kotlin/Native binary is roughly twice the size (the `ios-arm64` slice is
+15.4 MB debug vs 7.3 MB release), slower, and **does not behave identically on unhandled
+exceptions** -- Debug tends to log and continue where Release aborts. Shipping the
+debug zip to TestFlight means testing a configuration you are not going to ship.
+
+The two cannot be merged into one `.xcframework`. Slices are keyed by platform +
+arch + variant (device/simulator/catalyst), not by build configuration, so two
+`ios-arm64` slices collide:
+
+```
+A library with the identifier 'ios-arm64' already exists.
+```
+
+If you want Xcode to select automatically, unzip both to separate directories and
+set `FRAMEWORK_SEARCH_PATHS[config=Debug]` and `FRAMEWORK_SEARCH_PATHS[config=Release]`
+in the consumer target. (msak-ios-tester does not need this: it builds from source
+and its scheme pre-action regenerates `XCFrameworks/Current` for the active
+configuration -- see the bootstrap section below.)
+
 iOS/Xcode local consumption:
 
-1. Unzip `MsakShared.xcframework.zip` to a stable local path in your consumer project.
+1. Unzip the zip you need to a stable local path in your consumer project.
 2. Add `MsakShared.xcframework` to Xcode target dependencies/frameworks.
+3. **Embed it.** `MsakShared` is a *dynamic* framework, so it must be in the app
+   bundle's `Frameworks/` directory -- add it to an Embed Frameworks build phase
+   with "Embed & Sign". Linking without embedding builds and runs fine in the
+   simulator (dyld finds the framework next to the `.app` in the build products
+   directory) and then fails at launch on a real device with
+   `Library not loaded: @rpath/MsakShared.framework/MsakShared`.
 
 ### Running a local MSAK server for testing
 
@@ -327,13 +371,19 @@ Use this workflow when changing msak-client-kmp and testing it from CellWatch wi
 
     - Maven local coordinate exists at:
       - `~/.m2/repository/edu/gatech/cc/cellwatch/msak-client-kmp/<new-version>/`
-    - XCFramework zip/checksum exist at:
-      - `msak-shared/build/local-dist/apple/msak-client-kmp/<new-version>/`
+    - XCFramework zips/checksums exist at
+      `msak-shared/build/local-dist/apple/msak-client-kmp/<new-version>/`, one pair
+      per configuration:
+      - `MsakShared-debug.xcframework.zip` / `.sha256`
+      - `MsakShared-release.xcframework.zip` / `.sha256`
 
 4. Update CellWatch to consume the same local version:
 
     - Ensure CellWatch dependency resolution includes `mavenLocal()` before remote repos.
     - Update CellWatch MSAK dependency version to `<new-version>` (for example in `gradle/libs.versions.toml`).
+    - On iOS, replace the embedded `MsakShared.xcframework` with the unzipped
+      contents of the zip matching the configuration you are building -- use the
+      **release** zip for anything going to TestFlight.
     - Re-sync and rebuild CellWatch.
 
 5. If CellWatch still resolves an old artifact, refresh local caches:

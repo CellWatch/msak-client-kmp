@@ -157,41 +157,67 @@ publishing {
 
 val localAppleDistDir = layout.buildDirectory.dir("local-dist/apple/msak-client-kmp/${project.version}")
 
-tasks.register<Zip>("zipLocalDebugXcframework") {
-    dependsOn("assembleMsakSharedDebugXCFramework")
-    from(layout.buildDirectory.dir("XCFrameworks/debug/MsakShared.xcframework")) {
-        into("MsakShared.xcframework")
-    }
-    archiveFileName.set("MsakShared.xcframework.zip")
-    destinationDirectory.set(localAppleDistDir)
-}
+/*
+ * Debug and Release XCFrameworks ship as SEPARATE zips on purpose.
+ *
+ * A single .xcframework cannot carry both: slices are keyed by platform + arch +
+ * variant (device/simulator/catalyst), not by build configuration, so two
+ * ios-arm64 slices collide --
+ *   "A library with the identifier 'ios-arm64' already exists."
+ *
+ * Unlike the published .klib artifacts -- where the consumer links the framework
+ * itself and chooses its own configuration -- these zips are pre-linked, so the
+ * configuration is baked in. Anything shipping to TestFlight wants the release
+ * zip: a debug Kotlin/Native binary is larger, slower, and does not behave
+ * identically on unhandled exceptions.
+ */
+val xcframeworkConfigurations = listOf("debug" to "Debug", "release" to "Release")
 
-tasks.register("writeLocalDebugXcframeworkSha256") {
-    dependsOn("zipLocalDebugXcframework")
-    doLast {
-        val zipFile = localAppleDistDir.get().file("MsakShared.xcframework.zip").asFile
-        val digest = MessageDigest.getInstance("SHA-256")
-        zipFile.inputStream().use { input ->
-            val buffer = ByteArray(8192)
-            while (true) {
-                val read = input.read(buffer)
-                if (read <= 0) break
-                digest.update(buffer, 0, read)
-            }
+val localXcframeworkTasks = xcframeworkConfigurations.flatMap { (lower, capitalized) ->
+    val zipTask = tasks.register<Zip>("zipLocal${capitalized}Xcframework") {
+        group = "publishing"
+        description = "Zips the $lower MsakShared.xcframework for local distribution."
+        dependsOn("assembleMsakShared${capitalized}XCFramework")
+        from(layout.buildDirectory.dir("XCFrameworks/$lower/MsakShared.xcframework")) {
+            into("MsakShared.xcframework")
         }
-        val hash = digest.digest().joinToString("") { "%02x".format(it) }
-        val shaFile = localAppleDistDir.get().file("MsakShared.xcframework.sha256").asFile
-        shaFile.parentFile.mkdirs()
-        shaFile.writeText("$hash  MsakShared.xcframework.zip\n")
+        archiveFileName.set("MsakShared-$lower.xcframework.zip")
+        destinationDirectory.set(localAppleDistDir)
     }
+
+    val shaTask = tasks.register("writeLocal${capitalized}XcframeworkSha256") {
+        group = "publishing"
+        description = "Writes the SHA-256 checksum for the $lower XCFramework zip."
+        val zipFile = zipTask.flatMap { it.archiveFile }
+        val shaFile = localAppleDistDir.map { it.file("MsakShared-$lower.xcframework.sha256") }
+        inputs.file(zipFile)
+        outputs.file(shaFile)
+        doLast {
+            val zip = zipFile.get().asFile
+            val digest = MessageDigest.getInstance("SHA-256")
+            zip.inputStream().use { input ->
+                val buffer = ByteArray(8192)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read <= 0) break
+                    digest.update(buffer, 0, read)
+                }
+            }
+            val hash = digest.digest().joinToString("") { "%02x".format(it) }
+            val out = shaFile.get().asFile
+            out.parentFile.mkdirs()
+            out.writeText("$hash  ${zip.name}\n")
+        }
+    }
+
+    listOf(zipTask, shaTask)
 }
 
 tasks.register("publishLocalMavenAndXcframework") {
     group = "publishing"
-    description = "Publishes to mavenLocal and creates local XCFramework zip+sha artifacts."
-    dependsOn(
-        "publishToMavenLocal",
-        "zipLocalDebugXcframework",
-        "writeLocalDebugXcframeworkSha256",
-    )
+    description =
+        "Publishes to mavenLocal and creates local XCFramework zip+sha artifacts " +
+        "for both Debug and Release."
+    dependsOn("publishToMavenLocal")
+    dependsOn(localXcframeworkTasks)
 }
