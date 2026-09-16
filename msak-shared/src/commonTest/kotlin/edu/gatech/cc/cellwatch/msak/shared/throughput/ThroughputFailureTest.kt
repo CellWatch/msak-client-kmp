@@ -4,6 +4,7 @@ import edu.gatech.cc.cellwatch.msak.shared.MsakErrorCode
 import edu.gatech.cc.cellwatch.msak.shared.installTestLogger
 import edu.gatech.cc.cellwatch.msak.shared.MsakException
 import edu.gatech.cc.cellwatch.msak.shared.blackholeThroughputServer
+import edu.gatech.cc.cellwatch.msak.shared.latencyOnlyServer
 import edu.gatech.cc.cellwatch.msak.shared.malformedThroughputServer
 import edu.gatech.cc.cellwatch.msak.shared.unreachableThroughputServer
 import kotlinx.coroutines.CoroutineScope
@@ -95,6 +96,34 @@ class ThroughputFailureTest {
             )
         }
         assertTrue(e.message?.isNotBlank() == true)
+    }
+
+    /**
+     * Regression for the crash observed on a physical iPhone: the tester located a
+     * latency-only server and then ran Download. ThroughputTest resolves the
+     * WebSocket URL in its initialiser, which was evaluated *outside*
+     * runThroughput's try block, so the IllegalStateException bypassed the error
+     * boundary. Because it is not in the @Throws list, Kotlin/Native terminated
+     * the app rather than bridging it to Swift.
+     */
+    @Test
+    fun runThroughput_serverWithoutThroughputUrls_throwsStructuredMsakException(): Unit = runBlocking {
+        val e = assertFailsWith<MsakException> {
+            runThroughput(
+                ThroughputConfig(
+                    server = latencyOnlyServer(),
+                    direction = ThroughputDirection.DOWNLOAD,
+                    streams = 1,
+                    durationMs = 500,
+                    measurementId = "unit-test",
+                )
+            )
+        }
+        assertEquals(MsakErrorCode.INVALID_URL, e.code)
+        assertTrue(
+            e.message?.contains("throughput") == true,
+            "the message should say which endpoint was missing, got: ${e.message}"
+        )
     }
 
     @Test

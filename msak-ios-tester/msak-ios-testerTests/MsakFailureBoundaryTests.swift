@@ -96,6 +96,76 @@ final class MsakFailureBoundaryTests: XCTestCase {
         XCTAssertTrue(true)
     }
 
+    /// Reproduces the device crash seen after using the tester's "Locate
+    /// (latency)" button and then running Download: the located server carries
+    /// only latency URLs, Server.getThroughputUrl throws IllegalStateException
+    /// from ThroughputTest's constructor, and because that type is not in
+    /// runThroughput's @Throws list Kotlin/Native terminates the process instead
+    /// of bridging it as an NSError.
+    func testMissingThroughputUrlIsReturnedAndDoesNotTerminateTheHost() async throws {
+        let latencyOnlyServer = Server(
+            machine: "127.0.0.1",
+            location: nil,
+            urls: [
+                "http:///latency/v1/authorize":
+                    "http://127.0.0.1:\(Self.closedPort)/latency/v1/authorize",
+                "http:///latency/v1/result":
+                    "http://127.0.0.1:\(Self.closedPort)/latency/v1/result",
+            ],
+            latencyUdpPort: KotlinInt(int: Int32(Self.closedPort))
+        )
+
+        do {
+            _ = try await ThroughputRunnerKt.runThroughput(
+                config: ThroughputConfig(
+                    server: latencyOnlyServer,
+                    direction: .download,
+                    streams: 1,
+                    durationMs: 500,
+                    delayMs: 0,
+                    userAgent: nil,
+                    measurementId: "xctest"
+                )
+            )
+            XCTFail("expected runThroughput to fail on a server with no throughput URLs")
+        } catch {
+            let nsError = error as NSError
+            XCTAssertFalse(nsError.localizedDescription.isEmpty)
+        }
+    }
+
+    /// Same hazard on the latency side: LatencyTest resolves its control-plane
+    /// URLs in property initialisers, so a server with no latency URLs throws
+    /// during construction.
+    func testMissingLatencyUrlIsReturnedAndDoesNotTerminateTheHost() async throws {
+        let throughputOnlyServer = Server(
+            machine: "127.0.0.1",
+            location: nil,
+            urls: [
+                "ws:///throughput/v1/download":
+                    "ws://127.0.0.1:\(Self.closedPort)/throughput/v1/download",
+                "ws:///throughput/v1/upload":
+                    "ws://127.0.0.1:\(Self.closedPort)/throughput/v1/upload",
+            ],
+            latencyUdpPort: nil
+        )
+
+        do {
+            _ = try await LatencyRunnerKt.runLatency(
+                config: LatencyConfig(
+                    server: throughputOnlyServer,
+                    measurementId: "xctest",
+                    duration: 300,
+                    userAgent: nil
+                )
+            )
+            XCTFail("expected runLatency to fail on a server with no latency URLs")
+        } catch {
+            let nsError = error as NSError
+            XCTAssertFalse(nsError.localizedDescription.isEmpty)
+        }
+    }
+
     /// Both in sequence: a failed run must leave the library usable, i.e. it
     /// must not have leaked a poisoned global scope or an unclosed channel.
     func testRepeatedFailuresKeepTheLibraryUsable() async throws {

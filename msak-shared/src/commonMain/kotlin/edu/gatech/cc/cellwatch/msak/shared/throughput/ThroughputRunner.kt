@@ -192,33 +192,50 @@ internal fun summarizeThroughputAggregation(
 @Suppress("RedundantThrows")
 @Throws(MsakException::class, CancellationException::class)
 suspend fun runThroughput(config: ThroughputConfig): ThroughputSummary {
-    val test = ThroughputTest(
-        server = config.server,
-        direction = config.direction,
-        numStreams = config.streams,
-        duration = config.durationMs,
-        delay = config.delayMs,
-        measurementId = config.measurementId,
-        userAgent = config.userAgent
-    )
-
-    // Register this test as the active one so UI cancel can stop it.
-    ThroughputControl.register(test)
-
+    var test: ThroughputTest? = null
     val updates = ArrayList<ThroughputUpdate>(256)
 
     try {
+        // Construction must happen INSIDE the boundary. ThroughputTest resolves the
+        // server's WebSocket URL in its initialiser and throws IllegalStateException
+        // when the Server carries no throughput endpoint - which is exactly what a
+        // latency-only Locate result looks like. Anything that escapes this function
+        // that is not an MsakException violates the @Throws contract below, and
+        // Kotlin/Native then terminates the host app instead of bridging it to Swift
+        // as an NSError.
+        val activeTest = try {
+            ThroughputTest(
+                server = config.server,
+                direction = config.direction,
+                numStreams = config.streams,
+                duration = config.durationMs,
+                delay = config.delayMs,
+                measurementId = config.measurementId,
+                userAgent = config.userAgent
+            )
+        } catch (e: IllegalStateException) {
+            throw MsakException(
+                MsakErrorCode.INVALID_URL,
+                e.message ?: "server has no usable throughput URL",
+                e
+            )
+        }
+        test = activeTest
+
+        // Register this test as the active one so UI cancel can stop it.
+        ThroughputControl.register(activeTest)
+
         // NOTE: no SupervisorJob() here. Passing a Job to withContext reparents the
         // block and silently detaches it from the caller's cancellation. The
         // detached machinery inside ThroughputTest/ThroughputStream records its own
         // failures instead of rethrowing, so no supervision is needed at this level.
         return withContext(Dispatchers.Default) {
-            test.start()
-            val testStartTimeMs = test.startTime?.toEpochMilliseconds() ?: Clock.System.now().toEpochMilliseconds()
+            activeTest.start()
+            val testStartTimeMs = activeTest.startTime?.toEpochMilliseconds() ?: Clock.System.now().toEpochMilliseconds()
             // Drain updates until completion or timeout (duration + small grace)
             try {
                 withTimeout(config.durationMs.milliseconds + 3.seconds) {
-                    for (u in test.updatesChan) {
+                    for (u in activeTest.updatesChan) {
                         updates.add(u)
                     }
                 }
@@ -227,7 +244,7 @@ suspend fun runThroughput(config: ThroughputConfig): ThroughputSummary {
                 // compute summary from what we have. ThroughputTest will be finished below.
             }
             // Surface any error the test recorded
-            test.lastError?.let { throw it }
+            activeTest.lastError?.let { throw it }
 
             // If nothing moved at all, treat as handshake/authorization failure
             val agg = aggregateThroughputUpdates(
@@ -241,7 +258,7 @@ suspend fun runThroughput(config: ThroughputConfig): ThroughputSummary {
                 // Nothing moved at all. If a stream recorded why (connect refused,
                 // TLS failure, send/receive error), report that rather than a
                 // generic guess.
-                val streamError = test.firstStreamError()
+                val streamError = activeTest.firstStreamError()
                 throw if (streamError != null) {
                     mapToMsakException(
                         streamError,
@@ -263,11 +280,15 @@ suspend fun runThroughput(config: ThroughputConfig): ThroughputSummary {
         if (t is MsakException) throw t
         throw mapToMsakException(t, "throughput failed")
     } finally {
-        // Clear active test registration regardless of outcome
-        ThroughputControl.clear(test)
-        runCatching {
-            // Not all platforms expose an explicit stop; call if present.
-            test.stop()
+        // `test` stays null when construction itself failed, so there is nothing
+        // registered or running to clean up in that case.
+        test?.let {
+            // Clear active test registration regardless of outcome
+            ThroughputControl.clear(it)
+            runCatching {
+                // Not all platforms expose an explicit stop; call if present.
+                it.stop()
+            }
         }
     }
 }

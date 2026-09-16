@@ -23,6 +23,7 @@
 /* Begin PBXBuildFile section */
 		1F4AC3442E6A2A8400980EE9 /* MsakShared.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1F4AC3432E6A2A8400980EE9 /* MsakShared.xcframework */; };
 		1FA17E012E6A2A8400980EE9 /* MsakShared.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1F4AC3432E6A2A8400980EE9 /* MsakShared.xcframework */; };
+		1FA17E022E6A2A8400980EE9 /* MsakShared.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 1F4AC3432E6A2A8400980EE9 /* MsakShared.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -87,6 +88,20 @@
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		1FA17E032E6A2A8400980EE9 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				1FA17E022E6A2A8400980EE9 /* MsakShared.xcframework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFrameworksBuildPhase section */
 		1F70C0B82E671A5000A7FC72 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
@@ -145,6 +160,7 @@
 				1F70C0B72E671A5000A7FC72 /* Sources */,
 				1F70C0B82E671A5000A7FC72 /* Frameworks */,
 				1F70C0B92E671A5000A7FC72 /* Resources */,
+				1FA17E032E6A2A8400980EE9 /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
@@ -472,6 +488,7 @@
 				CODE_SIGN_ENTITLEMENTS = "msak-ios-tester/msak_ios_tester.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = LECSLW6UDQ;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -512,6 +529,7 @@
 				CODE_SIGN_ENTITLEMENTS = "msak-ios-tester/msak_ios_tester.entitlements";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = LECSLW6UDQ;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;

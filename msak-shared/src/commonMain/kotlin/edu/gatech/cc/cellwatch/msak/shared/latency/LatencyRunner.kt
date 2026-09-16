@@ -95,23 +95,41 @@ private fun fmt2(v: Double): String {
 @Suppress("RedundantThrows")
 @Throws(MsakException::class, CancellationException::class)
 suspend fun runLatency(config: LatencyConfig): LatencySummary {
-    val test = LatencyTest(
-        server = config.server,
-        measurementId = config.measurementId,
-        latencyPort = config.udpPort,
-        duration = config.duration,
-        userAgent = config.userAgent,
-    )
+    var test: LatencyTest? = null
     try {
+        // Construction must happen INSIDE the boundary. LatencyTest resolves its
+        // control-plane URLs in property initialisers and throws
+        // IllegalStateException when the Server carries no latency endpoint - what
+        // a throughput-only Locate result looks like. Anything that escapes this
+        // function that is not an MsakException violates the @Throws contract
+        // above, and Kotlin/Native then terminates the host app instead of bridging
+        // it to Swift as an NSError.
+        val activeTest = try {
+            LatencyTest(
+                server = config.server,
+                measurementId = config.measurementId,
+                latencyPort = config.udpPort,
+                duration = config.duration,
+                userAgent = config.userAgent,
+            )
+        } catch (e: IllegalStateException) {
+            throw MsakException(
+                MsakErrorCode.INVALID_URL,
+                e.message ?: "server has no usable latency URL",
+                e
+            )
+        }
+        test = activeTest
+
         // NOTE: no SupervisorJob() here. Passing a Job to withContext reparents the
         // block, which silently detaches it from the caller's cancellation. The
         // detached machinery inside LatencyTest records its own failures rather
         // than rethrowing, so no supervision is needed at this level.
         val drained = withContext(Dispatchers.Default) {
-            LatencyControl.register(test)
-            test.start()
+            LatencyControl.register(activeTest)
+            activeTest.start()
             withTimeoutOrNull(config.duration.milliseconds + 3.seconds) {
-                for (u in test.updatesChan) {
+                for (u in activeTest.updatesChan) {
                     // optional: forward to logs or a callback
                 }
                 true
@@ -119,7 +137,7 @@ suspend fun runLatency(config: LatencyConfig): LatencySummary {
         }
 
         // Surface any recorded error, mapping to MsakException if needed.
-        test.lastError?.let { err ->
+        activeTest.lastError?.let { err ->
             if (err is CancellationException) throw err
             throw mapToMsakException(err, "latency failed")
         }
@@ -130,7 +148,7 @@ suspend fun runLatency(config: LatencyConfig): LatencySummary {
                 "latency test did not complete within ${config.duration + 3_000}ms"
             )
         }
-        val res = test.result
+        val res = activeTest.result
             ?: throw MsakException(MsakErrorCode.UNKNOWN, "no latency result")
 
         val rtts = res.RoundTrips.mapNotNull { it.rttUs }
@@ -148,12 +166,21 @@ suspend fun runLatency(config: LatencyConfig): LatencySummary {
         )
     } catch (ce: CancellationException) {
         // If caller cancels, ensure the underlying test stops promptly, then rethrow.
-        runCatching { test.stop() }
+        test?.let { runCatching { it.stop() } }
         throw ce
+    } catch (t: Throwable) {
+        // Everything else leaves as an MsakException. Without this, a stray
+        // IllegalStateException (double start, bad server URL, ...) would breach
+        // the @Throws contract and kill the host app on Kotlin/Native.
+        if (t is MsakException) throw t
+        throw mapToMsakException(t, "latency failed")
     } finally {
-        // Ensure sockets/UDP are closed and background jobs are cancelled even on success.
-        runCatching { test.stop() }
-        LatencyControl.clear(test)
+        // Ensure sockets/UDP are closed and background jobs are cancelled even on
+        // success. `test` stays null when construction itself failed.
+        test?.let {
+            runCatching { it.stop() }
+            LatencyControl.clear(it)
+        }
     }
 }
 

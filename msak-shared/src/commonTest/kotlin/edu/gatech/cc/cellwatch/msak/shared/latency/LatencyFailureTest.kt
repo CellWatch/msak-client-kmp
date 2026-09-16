@@ -4,6 +4,7 @@ import edu.gatech.cc.cellwatch.msak.shared.MsakErrorCode
 import edu.gatech.cc.cellwatch.msak.shared.installTestLogger
 import edu.gatech.cc.cellwatch.msak.shared.MsakException
 import edu.gatech.cc.cellwatch.msak.shared.blackholeLatencyServer
+import edu.gatech.cc.cellwatch.msak.shared.throughputOnlyServer
 import edu.gatech.cc.cellwatch.msak.shared.unreachableLatencyServer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -96,6 +97,30 @@ class LatencyFailureTest {
         test.stop()
         test.stop()
         assertEquals(firstEnd, test.endTime, "finish() must run exactly once")
+    }
+
+    /**
+     * Mirror of the throughput case: LatencyTest resolves its control-plane URLs
+     * in property initialisers, so a server with no latency endpoint throws during
+     * construction. That has to surface as MsakException, not escape the @Throws
+     * contract.
+     */
+    @Test
+    fun runLatency_serverWithoutLatencyUrls_throwsStructuredMsakException(): Unit = runBlocking {
+        val e = assertFailsWith<MsakException> {
+            runLatency(
+                LatencyConfig(
+                    server = throughputOnlyServer(),
+                    measurementId = "unit-test",
+                    duration = 300,
+                )
+            )
+        }
+        assertEquals(MsakErrorCode.INVALID_URL, e.code)
+        assertTrue(
+            e.message?.contains("latency") == true,
+            "the message should say which endpoint was missing, got: ${e.message}"
+        )
     }
 
     @Test

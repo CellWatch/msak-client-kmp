@@ -78,6 +78,33 @@ fun unreachableThroughputServer(): Server = Server(
     ),
 )
 
+/**
+ * A Server carrying only latency endpoints.
+ *
+ * This is what the iOS tester's "Locate (latency)" button produces, and running
+ * a throughput test against it made `Server.getThroughputUrl` throw from
+ * `ThroughputTest`'s initialiser.
+ */
+fun latencyOnlyServer(): Server = Server(
+    machine = "127.0.0.1",
+    location = null,
+    urls = mapOf(
+        "http:///$LATENCY_AUTHORIZE_PATH" to "http://127.0.0.1:$CLOSED_PORT/$LATENCY_AUTHORIZE_PATH",
+        "http:///$LATENCY_RESULT_PATH" to "http://127.0.0.1:$CLOSED_PORT/$LATENCY_RESULT_PATH",
+    ),
+    latencyUdpPort = CLOSED_PORT,
+)
+
+/** A Server carrying only throughput endpoints. */
+fun throughputOnlyServer(): Server = Server(
+    machine = "127.0.0.1",
+    location = null,
+    urls = mapOf(
+        "ws:///$THROUGHPUT_DOWNLOAD_PATH" to "ws://127.0.0.1:$CLOSED_PORT/$THROUGHPUT_DOWNLOAD_PATH",
+        "ws:///$THROUGHPUT_UPLOAD_PATH" to "ws://127.0.0.1:$CLOSED_PORT/$THROUGHPUT_UPLOAD_PATH",
+    ),
+)
+
 /** A Server whose throughput URL is not a parseable WebSocket URL. */
 fun malformedThroughputServer(): Server = Server(
     machine = "bad",
