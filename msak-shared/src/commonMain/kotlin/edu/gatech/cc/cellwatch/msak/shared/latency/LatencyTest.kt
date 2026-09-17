@@ -30,8 +30,8 @@ import kotlinx.atomicfu.atomic
 
 import edu.gatech.cc.cellwatch.msak.shared.Log
 import edu.gatech.cc.cellwatch.msak.shared.LATENCY_CHARSET
-import edu.gatech.cc.cellwatch.msak.shared.LATENCY_ECHO_FUDGE
 import edu.gatech.cc.cellwatch.msak.shared.LATENCY_DURATION
+import edu.gatech.cc.cellwatch.msak.shared.latencyEchoWindowMs
 import edu.gatech.cc.cellwatch.msak.shared.Server
 import edu.gatech.cc.cellwatch.msak.shared.net.NetHttp
 import edu.gatech.cc.cellwatch.msak.shared.net.SocketFactory
@@ -307,7 +307,14 @@ class LatencyTest(
      * recording each update.
      */
     private suspend fun echoPackets(sock: KmpUdpSocket, initialMessage: LatencyMessage) {
-        val recvPoll = 200.milliseconds
+        // No coroutine-level poll timeout here: the socket already has
+        // SO_RCVTIMEO (250ms) and receive() returns null when it expires.
+        // Wrapping it in withTimeoutOrNull(200ms) meant the coroutine timeout
+        // always fired FIRST, abandoning a recvfrom still blocked in a
+        // Dispatchers.Default worker and immediately starting another. That went
+        // unnoticed while the echo window was shorter than the server's send
+        // loop, because the loop then always exited on a received packet and
+        // never polled silence.
 
         coroutineContext.ensureActive()
 
@@ -362,7 +369,7 @@ class LatencyTest(
         try {
             while (true) {
                 coroutineContext.ensureActive()
-                val pkt = withTimeoutOrNull(recvPoll) { sock.receive(rxBufSize) }
+                val pkt = sock.receive(rxBufSize)
                 if (pkt == null) {
                     // Timeout poll – check cancellation and deadline again
                     if (stopDeadline != null && Clock.System.now() >= stopDeadline) {
@@ -388,9 +395,7 @@ class LatencyTest(
                     // Measured against a real m-lab server, a 3s window reported
                     // 6.2% loss on a clean link; covering the full window reports
                     // 0.00% and yields 219 samples instead of 145.
-                    val effectiveDuration =
-                        maxOf(duration, LATENCY_DURATION) + LATENCY_ECHO_FUDGE
-                    stopDeadline = now + effectiveDuration.milliseconds
+                    stopDeadline = now + latencyEchoWindowMs(duration).milliseconds
                     coroutineContext.ensureActive()
                 }
 

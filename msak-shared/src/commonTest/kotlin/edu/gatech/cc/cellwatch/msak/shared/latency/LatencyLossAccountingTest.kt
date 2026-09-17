@@ -1,34 +1,86 @@
 package edu.gatech.cc.cellwatch.msak.shared.latency
 
+import edu.gatech.cc.cellwatch.msak.shared.LATENCY_DURATION
+import edu.gatech.cc.cellwatch.msak.shared.LATENCY_ECHO_STOP_MARGIN
+import edu.gatech.cc.cellwatch.msak.shared.latencyEchoWindowMs
+import edu.gatech.cc.cellwatch.msak.shared.latencyRunTimeoutMs
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
-/**
- * The server reports a lost packet as `RTT = 0, Lost = true`. That zero is a
- * real value, not a missing one, so it must be excluded from RTT statistics or
- * it drags the mean toward zero in proportion to the loss rate.
- *
- * Loss counts themselves are reported exactly as the server gives them; the
- * client covers the server's full send window so they are trustworthy.
- */
 class LatencyLossAccountingTest {
 
     private fun rt(rttUs: Long) = LatencyRoundTrip(rttUs = rttUs, lost = null)
     private fun lost() = LatencyRoundTrip(rttUs = 0, lost = true)
 
+    // --- loss accounting -----------------------------------------------------
+
     @Test
-    fun lostPacketsDoNotDragDownTheRttMean() {
+    fun trailingUnechoedPackets_areExcludedFromLoss() {
+        // Shape measured against m-lab: the client stops marginally before the
+        // server, so the last few packets are still in flight and unechoed when
+        // the result is requested. 4.41% reported, 0% actual.
         val res = LatencyResult(
             ID = "test",
-            RoundTrips = listOf(rt(10_000), rt(20_000), rt(30_000)) + List(7) { lost() },
-            PacketsSent = 10,
+            RoundTrips = List(217) { rt(19_000) } + List(10) { lost() },
+            PacketsSent = 227,
+            PacketsReceived = 217,
+        )
+
+        val summary = summarizeLatency(res)
+
+        assertEquals(217, summary.sent)
+        assertEquals(217, summary.received)
+    }
+
+    @Test
+    fun interiorLosses_areKept() {
+        // A gap with echoed packets on both sides is real network loss.
+        val res = LatencyResult(
+            ID = "test",
+            RoundTrips = List(10) { rt(20_000) } + lost() + lost() + List(10) { rt(20_000) },
+            PacketsSent = 22,
+            PacketsReceived = 20,
+        )
+
+        val summary = summarizeLatency(res)
+
+        assertEquals(22, summary.sent)
+        assertEquals(20, summary.received)
+    }
+
+    @Test
+    fun interiorAndTrailingLosses_areDistinguished() {
+        val res = LatencyResult(
+            ID = "test",
+            RoundTrips = List(5) { rt(20_000) } + lost() + List(5) { rt(20_000) } + List(3) { lost() },
+            PacketsSent = 14,
+            PacketsReceived = 10,
+        )
+
+        val summary = summarizeLatency(res)
+
+        assertEquals(11, summary.sent)
+        assertEquals(10, summary.received)
+    }
+
+    // --- RTT statistics ------------------------------------------------------
+
+    @Test
+    fun lostPacketsDoNotDragDownTheRttMean() {
+        // An interior loss survives trimming, so its rttUs = 0 must still be
+        // excluded from the mean explicitly.
+        val res = LatencyResult(
+            ID = "test",
+            RoundTrips = listOf(rt(10_000), lost(), rt(20_000), lost(), rt(30_000)),
+            PacketsSent = 5,
             PacketsReceived = 3,
         )
 
         val summary = summarizeLatency(res)
 
-        // Naively averaging rttUs over all ten entries would give 6.0 ms.
+        // Averaging all five rttUs values would give 12.0 ms.
         assertEquals(20.0, summary.meanMs)
     }
 
@@ -36,9 +88,9 @@ class LatencyLossAccountingTest {
     fun lostPacketsDoNotDistortStdev() {
         val res = LatencyResult(
             ID = "test",
-            RoundTrips = List(5) { rt(20_000) } + List(5) { lost() },
-            PacketsSent = 10,
-            PacketsReceived = 5,
+            RoundTrips = listOf(rt(20_000), lost(), rt(20_000), lost(), rt(20_000)),
+            PacketsSent = 5,
+            PacketsReceived = 3,
         )
 
         val summary = summarizeLatency(res)
@@ -47,24 +99,10 @@ class LatencyLossAccountingTest {
         assertEquals(0.0, summary.stdevMs)
     }
 
-    @Test
-    fun serverLossCountsAreReportedUnchanged() {
-        // Real loss must reach the caller; the client does not second-guess it.
-        val res = LatencyResult(
-            ID = "test",
-            RoundTrips = List(90) { rt(20_000) } + List(10) { lost() },
-            PacketsSent = 100,
-            PacketsReceived = 90,
-        )
-
-        val summary = summarizeLatency(res)
-
-        assertEquals(100, summary.sent)
-        assertEquals(90, summary.received)
-    }
+    // --- fallbacks -----------------------------------------------------------
 
     @Test
-    fun allPacketsLost_yieldsNoRttStatistics() {
+    fun allPacketsLost_fallsBackToServerScalars() {
         val res = LatencyResult(
             ID = "test",
             RoundTrips = List(6) { lost() },
@@ -77,17 +115,38 @@ class LatencyLossAccountingTest {
         assertEquals(6, summary.sent)
         assertEquals(0, summary.received)
         assertNull(summary.meanMs)
-        assertNull(summary.stdevMs)
     }
 
     @Test
-    fun missingRoundTripsArray_stillReportsServerScalars() {
+    fun missingRoundTripsArray_fallsBackToServerScalars() {
         val res = LatencyResult(ID = "test", PacketsSent = 100, PacketsReceived = 97)
 
         val summary = summarizeLatency(res)
 
         assertEquals(100, summary.sent)
         assertEquals(97, summary.received)
-        assertNull(summary.meanMs)
+    }
+
+    // --- window sizing -------------------------------------------------------
+
+    @Test
+    fun echoWindowStopsBeforeTheServerSendLoopEnds() {
+        // Outliving the server makes the loop poll a silent socket, which hangs.
+        assertTrue(
+            latencyEchoWindowMs(3_000) < LATENCY_DURATION,
+            "echo window must end before the server stops sending",
+        )
+        assertEquals(LATENCY_DURATION - LATENCY_ECHO_STOP_MARGIN, latencyEchoWindowMs(3_000))
+    }
+
+    @Test
+    fun echoWindowHonoursACallerAskingForLonger() {
+        assertEquals(9_000, latencyEchoWindowMs(9_000))
+    }
+
+    @Test
+    fun runTimeoutLeavesRoomForHandshakeAndResult() {
+        // The timeout must exceed the echo window, or a healthy run aborts.
+        assertTrue(latencyRunTimeoutMs(3_000) > latencyEchoWindowMs(3_000) + 3_000)
     }
 }

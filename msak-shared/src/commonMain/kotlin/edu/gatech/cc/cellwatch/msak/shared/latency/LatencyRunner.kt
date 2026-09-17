@@ -15,7 +15,8 @@ import kotlin.math.roundToLong
 
 import edu.gatech.cc.cellwatch.msak.shared.MsakException
 import edu.gatech.cc.cellwatch.msak.shared.MsakErrorCode
-import edu.gatech.cc.cellwatch.msak.shared.LATENCY_DURATION
+import edu.gatech.cc.cellwatch.msak.shared.latencyEchoWindowMs
+import edu.gatech.cc.cellwatch.msak.shared.latencyRunTimeoutMs
 import edu.gatech.cc.cellwatch.msak.shared.mapToMsakException
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -97,27 +98,64 @@ private fun fmt2(v: Double): String {
  * Builds the caller-visible summary from the server's result.
  *
  * The loss counts are the SERVER's, fetched over HTTP from `latency/v1/result`;
- * nothing the client records locally affects them. They are reported as-is,
- * because [LatencyTest] now echoes for the server's full send window - see the
- * note there. Trimming or otherwise adjusting them here would risk masking a
- * genuine loss of connectivity late in a test.
+ * nothing the client records locally affects them. The server's accounting
+ * (msak `internal/latency1/latency1.go`) appends every packet as
+ * `RoundTrip{Lost: true}` when it is sent and only clears it when the echo
+ * arrives, its send loop runs for a fixed `sendDuration = 5 * time.Second` on
+ * its own context, and it never learns that the client has finished.
  *
- * RTT statistics do need care: the server represents a lost packet as
- * `RTT = 0, Lost = true`, which is a real zero rather than a missing value, so
- * including it drags the mean toward zero in proportion to the loss rate.
+ * Two corrections are therefore needed, and both are load-bearing - measured
+ * against a real m-lab server on otherwise clean links:
+ *
+ * 1. The echo window (see [latencyEchoWindowMs]) covers nearly the whole server
+ *    send loop instead of the caller's shorter duration. A 3s request used to
+ *    capture 145 of ~220 packets and report 6.2% loss; it now captures ~197-227.
+ *
+ * 2. The client still has to stop marginally before the server does, so the last
+ *    few packets remain in flight and unechoed when the result is requested.
+ *    That residue scales with RTT: nil on loopback (197 of 197) but 4.41%
+ *    (10 of 227) against m-lab, and in both cases every interior packet had a
+ *    valid RTT. So the trailing run of unanswered packets is excluded here.
+ *    Interior losses - a gap with echoed packets on both sides - are real and
+ *    are kept.
+ *
+ * Extending the window PAST the server instead of trimming was tried and cannot
+ * be used: it makes the loop poll a silent socket, which hangs (see
+ * [LATENCY_ECHO_STOP_MARGIN]).
+ *
+ * RTT statistics need separate care: the server represents a lost packet as
+ * `RTT = 0, Lost = true`, a real zero rather than a missing value, so including
+ * it drags the mean toward zero in proportion to the loss rate.
+ *
+ * Limitation: trimming cannot distinguish the unechoed tail from a genuine loss
+ * of connectivity in the final moments of a test. The tail is bounded by the
+ * stop margin, so it is small.
  */
 internal fun summarizeLatency(res: LatencyResult): LatencySummary {
+    val measured = res.RoundTrips.dropLastWhile { it.lost == true }
+
     // Filter on `lost`, not on nullability: a lost packet reports rttUs = 0.
-    val rtts = res.RoundTrips.filter { it.lost != true }.mapNotNull { it.rttUs }
+    val rtts = measured.filter { it.lost != true }.mapNotNull { it.rttUs }
     val mean = rtts.takeIf { it.isNotEmpty() }?.average()?.div(1000.0)
     val stdev = rtts.takeIf { it.isNotEmpty() }?.let { xs ->
         val mu = xs.average()
         kotlin.math.sqrt(xs.fold(0.0) { acc, v -> val d = v - mu; acc + d * d } / xs.size) / 1000.0
     }
 
+    // No per-packet array, or nothing was ever echoed: there is no measurement
+    // window to trim to, so report what the server said.
+    if (measured.isEmpty()) {
+        return LatencySummary(
+            sent = res.PacketsSent ?: 0,
+            received = res.PacketsReceived ?: 0,
+            meanMs = mean,
+            stdevMs = stdev,
+        )
+    }
+
     return LatencySummary(
-        sent = res.PacketsSent ?: 0,
-        received = res.PacketsReceived ?: 0,
+        sent = measured.size,
+        received = measured.count { it.lost != true },
         meanMs = mean,
         stdevMs = stdev,
     )
@@ -159,7 +197,7 @@ suspend fun runLatency(config: LatencyConfig): LatencySummary {
         val drained = withContext(Dispatchers.Default) {
             LatencyControl.register(activeTest)
             activeTest.start()
-            withTimeoutOrNull(maxOf(config.duration, LATENCY_DURATION).milliseconds + 3.seconds) {
+            withTimeoutOrNull(latencyRunTimeoutMs(config.duration).milliseconds) {
                 for (u in activeTest.updatesChan) {
                     // optional: forward to logs or a callback
                 }
@@ -176,7 +214,7 @@ suspend fun runLatency(config: LatencyConfig): LatencySummary {
             // The test never closed its updates channel inside the run window.
             throw MsakException(
                 MsakErrorCode.TIMEOUT,
-                "latency test did not complete within ${maxOf(config.duration, LATENCY_DURATION) + 3_000}ms"
+                "latency test did not complete within ${latencyRunTimeoutMs(config.duration)}ms"
             )
         }
         val res = activeTest.result
