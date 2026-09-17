@@ -76,3 +76,11 @@ val LATENCY_CHARSET = "UTF-8"
  * The duration of a latency test.
  */
 const val LATENCY_DURATION = 5000L
+
+/**
+ * Extra time the client keeps echoing past [LATENCY_DURATION].
+ *
+ * Covers scheduling jitter and the memoryless send interval so the server's
+ * final packets are echoed rather than recorded as lost.
+ */
+const val LATENCY_ECHO_FUDGE = 500L

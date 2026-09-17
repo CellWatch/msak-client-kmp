@@ -9,7 +9,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -24,12 +23,14 @@ import kotlin.time.Duration.Companion.milliseconds
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.atomicfu.atomic
 
 import edu.gatech.cc.cellwatch.msak.shared.Log
 import edu.gatech.cc.cellwatch.msak.shared.LATENCY_CHARSET
+import edu.gatech.cc.cellwatch.msak.shared.LATENCY_ECHO_FUDGE
 import edu.gatech.cc.cellwatch.msak.shared.LATENCY_DURATION
 import edu.gatech.cc.cellwatch.msak.shared.Server
 import edu.gatech.cc.cellwatch.msak.shared.net.NetHttp
@@ -375,7 +376,21 @@ class LatencyTest(
                 if (!gotFirst) {
                     gotFirst = true
                     retryJob.cancel()
-                    stopDeadline = now + duration.milliseconds
+                    // Echo for at least as long as the server sends.
+                    //
+                    // The server's send loop runs for a fixed
+                    // `sendDuration = 5 * time.Second` on its own context
+                    // (msak internal/latency1/latency1.go), independent of the
+                    // client, and it marks every packet Lost until the echo
+                    // arrives. Stopping earlier - which is what a caller asking
+                    // for a shorter duration used to do - leaves the remainder
+                    // permanently unechoed and the server reports them as lost.
+                    // Measured against a real m-lab server, a 3s window reported
+                    // 6.2% loss on a clean link; covering the full window reports
+                    // 0.00% and yields 219 samples instead of 145.
+                    val effectiveDuration =
+                        maxOf(duration, LATENCY_DURATION) + LATENCY_ECHO_FUDGE
+                    stopDeadline = now + effectiveDuration.milliseconds
                     coroutineContext.ensureActive()
                 }
 
@@ -396,7 +411,13 @@ class LatencyTest(
                     if (!ended) Log.e(TAG, "failed to echo UDP packet", it)
                 }
 
-                // Check deadline
+                // Check deadline. The server keeps sending past this point, so
+                // its final packets go unechoed and it reports them as lost; see
+                // summarizeLatency() in LatencyRunner, which excludes that
+                // trailing teardown block from the loss metric. Extending this
+                // window does not help - measured against a real m-lab server it
+                // made reported loss worse, because a later cutoff simply leaves
+                // a larger batch unanswered.
                 if (stopDeadline != null && now >= stopDeadline) {
                     Log.d(TAG, "no server-driven end; finishing latency on client after duration window")
                     break

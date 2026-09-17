@@ -15,6 +15,7 @@ import kotlin.math.roundToLong
 
 import edu.gatech.cc.cellwatch.msak.shared.MsakException
 import edu.gatech.cc.cellwatch.msak.shared.MsakErrorCode
+import edu.gatech.cc.cellwatch.msak.shared.LATENCY_DURATION
 import edu.gatech.cc.cellwatch.msak.shared.mapToMsakException
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -92,6 +93,36 @@ private fun fmt2(v: Double): String {
  * drains updates up to (duration + 3s) and then summarizes.
  * The caller owns any UI and logging.
  */
+/**
+ * Builds the caller-visible summary from the server's result.
+ *
+ * The loss counts are the SERVER's, fetched over HTTP from `latency/v1/result`;
+ * nothing the client records locally affects them. They are reported as-is,
+ * because [LatencyTest] now echoes for the server's full send window - see the
+ * note there. Trimming or otherwise adjusting them here would risk masking a
+ * genuine loss of connectivity late in a test.
+ *
+ * RTT statistics do need care: the server represents a lost packet as
+ * `RTT = 0, Lost = true`, which is a real zero rather than a missing value, so
+ * including it drags the mean toward zero in proportion to the loss rate.
+ */
+internal fun summarizeLatency(res: LatencyResult): LatencySummary {
+    // Filter on `lost`, not on nullability: a lost packet reports rttUs = 0.
+    val rtts = res.RoundTrips.filter { it.lost != true }.mapNotNull { it.rttUs }
+    val mean = rtts.takeIf { it.isNotEmpty() }?.average()?.div(1000.0)
+    val stdev = rtts.takeIf { it.isNotEmpty() }?.let { xs ->
+        val mu = xs.average()
+        kotlin.math.sqrt(xs.fold(0.0) { acc, v -> val d = v - mu; acc + d * d } / xs.size) / 1000.0
+    }
+
+    return LatencySummary(
+        sent = res.PacketsSent ?: 0,
+        received = res.PacketsReceived ?: 0,
+        meanMs = mean,
+        stdevMs = stdev,
+    )
+}
+
 @Suppress("RedundantThrows")
 @Throws(MsakException::class, CancellationException::class)
 suspend fun runLatency(config: LatencyConfig): LatencySummary {
@@ -128,7 +159,7 @@ suspend fun runLatency(config: LatencyConfig): LatencySummary {
         val drained = withContext(Dispatchers.Default) {
             LatencyControl.register(activeTest)
             activeTest.start()
-            withTimeoutOrNull(config.duration.milliseconds + 3.seconds) {
+            withTimeoutOrNull(maxOf(config.duration, LATENCY_DURATION).milliseconds + 3.seconds) {
                 for (u in activeTest.updatesChan) {
                     // optional: forward to logs or a callback
                 }
@@ -145,25 +176,13 @@ suspend fun runLatency(config: LatencyConfig): LatencySummary {
             // The test never closed its updates channel inside the run window.
             throw MsakException(
                 MsakErrorCode.TIMEOUT,
-                "latency test did not complete within ${config.duration + 3_000}ms"
+                "latency test did not complete within ${maxOf(config.duration, LATENCY_DURATION) + 3_000}ms"
             )
         }
         val res = activeTest.result
             ?: throw MsakException(MsakErrorCode.UNKNOWN, "no latency result")
 
-        val rtts = res.RoundTrips.mapNotNull { it.rttUs }
-        val mean = rtts.takeIf { it.isNotEmpty() }?.average()?.div(1000.0)
-        val stdev = rtts.takeIf { it.isNotEmpty() }?.let { xs ->
-            val mu = xs.average()
-            kotlin.math.sqrt(xs.fold(0.0) { acc, v -> val d = v - mu; acc + d * d } / xs.size) / 1000.0
-        }
-
-        return LatencySummary(
-            sent = res.PacketsSent ?: 0,
-            received = res.PacketsReceived ?: 0,
-            meanMs = mean,
-            stdevMs = stdev
-        )
+        return summarizeLatency(res)
     } catch (ce: CancellationException) {
         // If caller cancels, ensure the underlying test stops promptly, then rethrow.
         test?.let { runCatching { it.stop() } }
