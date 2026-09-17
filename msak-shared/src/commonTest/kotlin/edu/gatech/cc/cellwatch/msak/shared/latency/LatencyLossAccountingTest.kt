@@ -1,8 +1,9 @@
 package edu.gatech.cc.cellwatch.msak.shared.latency
 
 import edu.gatech.cc.cellwatch.msak.shared.LATENCY_DURATION
-import edu.gatech.cc.cellwatch.msak.shared.LATENCY_ECHO_STOP_MARGIN
-import edu.gatech.cc.cellwatch.msak.shared.latencyEchoWindowMs
+import edu.gatech.cc.cellwatch.msak.shared.LATENCY_HANDSHAKE_BUDGET
+import edu.gatech.cc.cellwatch.msak.shared.LATENCY_QUIET_THRESHOLD
+import edu.gatech.cc.cellwatch.msak.shared.latencyEchoCeilingMs
 import edu.gatech.cc.cellwatch.msak.shared.latencyRunTimeoutMs
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -17,52 +18,37 @@ class LatencyLossAccountingTest {
     // --- loss accounting -----------------------------------------------------
 
     @Test
-    fun trailingUnechoedPackets_areExcludedFromLoss() {
-        // Shape measured against m-lab: the client stops marginally before the
-        // server, so the last few packets are still in flight and unechoed when
-        // the result is requested. 4.41% reported, 0% actual.
+    fun serverLossCountsAreReportedVerbatim() {
+        // Termination now waits for the server to fall silent, so an unechoed
+        // packet means real loss and must not be adjusted away.
         val res = LatencyResult(
             ID = "test",
-            RoundTrips = List(217) { rt(19_000) } + List(10) { lost() },
-            PacketsSent = 227,
-            PacketsReceived = 217,
+            RoundTrips = List(90) { rt(20_000) } + List(10) { lost() },
+            PacketsSent = 100,
+            PacketsReceived = 90,
         )
 
         val summary = summarizeLatency(res)
 
-        assertEquals(217, summary.sent)
-        assertEquals(217, summary.received)
+        assertEquals(100, summary.sent)
+        assertEquals(90, summary.received)
     }
 
     @Test
-    fun interiorLosses_areKept() {
-        // A gap with echoed packets on both sides is real network loss.
+    fun trailingLossIsNotTrimmed() {
+        // A late run of losses is what a connection failing near the end of a
+        // test looks like. Hiding it would be the worst possible reading.
         val res = LatencyResult(
             ID = "test",
-            RoundTrips = List(10) { rt(20_000) } + lost() + lost() + List(10) { rt(20_000) },
-            PacketsSent = 22,
-            PacketsReceived = 20,
+            RoundTrips = List(200) { rt(20_000) } + List(25) { lost() },
+            PacketsSent = 225,
+            PacketsReceived = 200,
         )
 
         val summary = summarizeLatency(res)
 
-        assertEquals(22, summary.sent)
-        assertEquals(20, summary.received)
-    }
-
-    @Test
-    fun interiorAndTrailingLosses_areDistinguished() {
-        val res = LatencyResult(
-            ID = "test",
-            RoundTrips = List(5) { rt(20_000) } + lost() + List(5) { rt(20_000) } + List(3) { lost() },
-            PacketsSent = 14,
-            PacketsReceived = 10,
-        )
-
-        val summary = summarizeLatency(res)
-
-        assertEquals(11, summary.sent)
-        assertEquals(10, summary.received)
+        assertEquals(225, summary.sent)
+        assertEquals(200, summary.received)
     }
 
     // --- RTT statistics ------------------------------------------------------
@@ -127,26 +113,36 @@ class LatencyLossAccountingTest {
         assertEquals(97, summary.received)
     }
 
-    // --- window sizing -------------------------------------------------------
+    // --- termination bounds -------------------------------------------------
 
     @Test
-    fun echoWindowStopsBeforeTheServerSendLoopEnds() {
-        // Outliving the server makes the loop poll a silent socket, which hangs.
+    fun quietThresholdIsWellAboveTheServersMaxSendInterval() {
+        // msak sends with memoryless Max: 40ms, so silence this long is
+        // unambiguous proof the send loop has ended.
         assertTrue(
-            latencyEchoWindowMs(3_000) < LATENCY_DURATION,
-            "echo window must end before the server stops sending",
+            LATENCY_QUIET_THRESHOLD >= 10 * 40L,
+            "quiet threshold must not be mistakable for normal send jitter",
         )
-        assertEquals(LATENCY_DURATION - LATENCY_ECHO_STOP_MARGIN, latencyEchoWindowMs(3_000))
     }
 
     @Test
-    fun echoWindowHonoursACallerAskingForLonger() {
-        assertEquals(9_000, latencyEchoWindowMs(9_000))
+    fun echoCeilingOutlastsTheServerSendLoop() {
+        // The ceiling is a backstop; it must not cut a healthy run short before
+        // silence can be observed.
+        assertTrue(latencyEchoCeilingMs(3_000) > LATENCY_DURATION + LATENCY_QUIET_THRESHOLD)
     }
 
     @Test
-    fun runTimeoutLeavesRoomForHandshakeAndResult() {
-        // The timeout must exceed the echo window, or a healthy run aborts.
-        assertTrue(latencyRunTimeoutMs(3_000) > latencyEchoWindowMs(3_000) + 3_000)
+    fun echoCeilingHonoursACallerAskingForLonger() {
+        assertTrue(latencyEchoCeilingMs(9_000) > 9_000)
+    }
+
+    @Test
+    fun runTimeoutLeavesRoomForHandshakeCeilingAndResult() {
+        // Deriving these separately is what produced an abort at 8000ms on a
+        // healthy run.
+        assertTrue(
+            latencyRunTimeoutMs(3_000) >= LATENCY_HANDSHAKE_BUDGET + latencyEchoCeilingMs(3_000),
+        )
     }
 }

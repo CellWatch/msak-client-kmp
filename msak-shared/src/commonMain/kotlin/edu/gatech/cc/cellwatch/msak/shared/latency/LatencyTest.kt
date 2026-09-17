@@ -31,7 +31,8 @@ import kotlinx.atomicfu.atomic
 import edu.gatech.cc.cellwatch.msak.shared.Log
 import edu.gatech.cc.cellwatch.msak.shared.LATENCY_CHARSET
 import edu.gatech.cc.cellwatch.msak.shared.LATENCY_DURATION
-import edu.gatech.cc.cellwatch.msak.shared.latencyEchoWindowMs
+import edu.gatech.cc.cellwatch.msak.shared.LATENCY_QUIET_THRESHOLD
+import edu.gatech.cc.cellwatch.msak.shared.latencyEchoCeilingMs
 import edu.gatech.cc.cellwatch.msak.shared.Server
 import edu.gatech.cc.cellwatch.msak.shared.net.NetHttp
 import edu.gatech.cc.cellwatch.msak.shared.net.SocketFactory
@@ -365,15 +366,27 @@ class LatencyTest(
 
         // Receive / echo loop. Stop ~[duration] ms after first reply.
         val rxBufSize = 2048
-        var stopDeadline: Instant? = null
+        // Termination is observed, not timed: the loop ends once the server has
+        // been quiet for LATENCY_QUIET_THRESHOLD. `ceiling` is only a backstop
+        // for a server that never stops sending.
+        var ceiling: Instant? = null
+        var lastPacketAt: Instant? = null
         try {
             while (true) {
                 coroutineContext.ensureActive()
                 val pkt = sock.receive(rxBufSize)
                 if (pkt == null) {
-                    // Timeout poll – check cancellation and deadline again
-                    if (stopDeadline != null && Clock.System.now() >= stopDeadline) {
-                        Log.d(TAG, "no server-driven end; finishing latency on client after duration window")
+                    // SO_RCVTIMEO expired with nothing to read. If the server has
+                    // been quiet well past its maximum send interval (40ms), it
+                    // has finished and so have we.
+                    val idleNow = Clock.System.now()
+                    val quietFor = lastPacketAt?.let { idleNow - it }
+                    if (quietFor != null && quietFor.inWholeMilliseconds >= LATENCY_QUIET_THRESHOLD) {
+                        Log.d(TAG, "server quiet for ${quietFor.inWholeMilliseconds}ms; latency data plane complete")
+                        break
+                    }
+                    if (ceiling != null && idleNow >= ceiling) {
+                        Log.i(TAG, "latency echo ceiling reached without observing silence")
                         break
                     }
                     continue
@@ -395,7 +408,7 @@ class LatencyTest(
                     // Measured against a real m-lab server, a 3s window reported
                     // 6.2% loss on a clean link; covering the full window reports
                     // 0.00% and yields 219 samples instead of 145.
-                    stopDeadline = now + latencyEchoWindowMs(duration).milliseconds
+                    ceiling = now + latencyEchoCeilingMs(duration).milliseconds
                     coroutineContext.ensureActive()
                 }
 
@@ -416,15 +429,12 @@ class LatencyTest(
                     if (!ended) Log.e(TAG, "failed to echo UDP packet", it)
                 }
 
-                // Check deadline. The server keeps sending past this point, so
-                // its final packets go unechoed and it reports them as lost; see
-                // summarizeLatency() in LatencyRunner, which excludes that
-                // trailing teardown block from the loss metric. Extending this
-                // window does not help - measured against a real m-lab server it
-                // made reported loss worse, because a later cutoff simply leaves
-                // a larger batch unanswered.
-                if (stopDeadline != null && now >= stopDeadline) {
-                    Log.d(TAG, "no server-driven end; finishing latency on client after duration window")
+                lastPacketAt = now
+
+                // Only the backstop applies on the packet path; normal
+                // termination happens above, once the server goes quiet.
+                if (ceiling != null && now >= ceiling) {
+                    Log.i(TAG, "latency echo ceiling reached while server still sending")
                     break
                 }
             }

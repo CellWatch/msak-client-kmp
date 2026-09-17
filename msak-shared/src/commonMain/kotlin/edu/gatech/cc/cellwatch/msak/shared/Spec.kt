@@ -78,20 +78,17 @@ val LATENCY_CHARSET = "UTF-8"
 const val LATENCY_DURATION = 5000L
 
 /**
- * How long before the server's send loop ends the client stops echoing.
+ * How long the client waits without receiving a packet before concluding that
+ * the server's send loop has ended.
  *
- * The client must NOT outlive the server. Polling a silent socket exercises a
- * path that hangs: `receive()` relies on SO_RCVTIMEO to wake, and against a
- * server that stops first the loop stalls until the run timeout fires. That is
- * a real defect in the receive path, but stopping just short of the server both
- * avoids it and keeps the loop exiting on a received packet, which is the only
- * path exercised in practice today.
- *
- * Measured: with the window extended 500ms PAST the server, a local-server run
- * hung and aborted at 13000ms; stopping 250ms short completed with 197 of 197
- * packets echoed.
+ * This is the measurement's real termination condition, and it is observed
+ * rather than assumed. The server's send interval is bounded - msak's
+ * `memoryless.Config{ Expected: 25ms, Min: 10ms, Max: 40ms }` - so a live server
+ * never goes quiet for anything close to this long. Concluding from silence
+ * keeps working if the server's own send duration ever changes, which a margin
+ * measured against [LATENCY_DURATION] would not.
  */
-const val LATENCY_ECHO_STOP_MARGIN = 250L
+const val LATENCY_QUIET_THRESHOLD = 500L
 
 /**
  * Worst case time the initial-packet handshake can consume before giving up:
@@ -100,18 +97,14 @@ const val LATENCY_ECHO_STOP_MARGIN = 250L
 const val LATENCY_HANDSHAKE_BUDGET = 4500L
 
 /**
- * How long the client echoes, given the duration the caller asked for.
+ * Upper bound on the echo loop, used only if silence is never observed - for
+ * instance against a server that keeps sending indefinitely.
  *
- * At least the server's own send window less [LATENCY_ECHO_STOP_MARGIN], so a
- * caller asking for less than the server sends no longer cuts the sample short -
- * a 3s request used to capture 145 of ~220 packets and is now ~197.
- *
- * Single definition so the echo loop and the runner's timeout cannot drift
- * apart; widening one without the other aborted runs at "did not complete
- * within 8000ms".
+ * A fallback, not a schedule: normal termination is
+ * [LATENCY_QUIET_THRESHOLD] of quiet.
  */
-fun latencyEchoWindowMs(callerDurationMs: Long): Long =
-    maxOf(callerDurationMs, LATENCY_DURATION - LATENCY_ECHO_STOP_MARGIN)
+fun latencyEchoCeilingMs(callerDurationMs: Long): Long =
+    maxOf(callerDurationMs, LATENCY_DURATION) + 2 * LATENCY_QUIET_THRESHOLD
 
 fun latencyRunTimeoutMs(callerDurationMs: Long): Long =
-    LATENCY_HANDSHAKE_BUDGET + latencyEchoWindowMs(callerDurationMs) + 3_000L
+    LATENCY_HANDSHAKE_BUDGET + latencyEchoCeilingMs(callerDurationMs) + 3_000L

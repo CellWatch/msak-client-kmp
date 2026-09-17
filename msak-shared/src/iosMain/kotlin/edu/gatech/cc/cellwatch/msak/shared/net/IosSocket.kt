@@ -3,7 +3,7 @@ package edu.gatech.cc.cellwatch.msak.shared.net
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.CancellationException
 import kotlinx.cinterop.*
@@ -90,12 +90,14 @@ internal class IosUdpSocket : KmpUdpSocket {
             if (fd >= 0) closeFdQuiet(fd)
             fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP)
             if (fd < 0) throw UdpException("socket() failed", errno)
+            applySocketOptions(fd)
             closed = false
             connected = false
         } else if (isIPv4Literal) {
             if (fd >= 0) closeFdQuiet(fd)
             fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
             if (fd < 0) throw UdpException("socket() failed", errno)
+            applySocketOptions(fd)
             closed = false
             connected = false
         }
@@ -210,8 +212,21 @@ internal class IosUdpSocket : KmpUdpSocket {
                 if (nBytes < 0) {
                     val e = errno
                     // If we were cancelled or the socket was closed, surface a cooperative cancellation instead of crashing.
-                    val ctx = currentCoroutineContext()
-                    if (closed || !ctx.isActive || e == EBADF) {
+                    //
+                    // Deliberately `isActive` (a CoroutineScope property) rather
+                    // than currentCoroutineContext(), which is a SUSPEND
+                    // function. Suspending here suspends inside both usePinned
+                    // and memScoped, whose pin and arena are thread-confined on
+                    // Kotlin/Native, so the continuation could resume on another
+                    // worker while they belong to the original one.
+                    //
+                    // This branch only runs when recvfrom returns < 0, i.e. on a
+                    // SO_RCVTIMEO timeout, so it stayed invisible for as long as
+                    // the latency echo loop always exited on a received packet.
+                    // Once the loop began polling a silent socket, a subsequent
+                    // unrelated HTTP request stopped completing and the run
+                    // aborted at its timeout.
+                    if (closed || !isActive || e == EBADF) {
                         throw CancellationException("UDP receive cancelled")
                     }
                     // Timeout from SO_RCVTIMEO: return null so callers can poll and re-check state.
@@ -252,6 +267,42 @@ internal class IosUdpSocket : KmpUdpSocket {
         if (fd >= 0 && !closed) throw UdpException("socket already open | fd=$fd closed=$closed")
     }
 
+    /**
+     * Applies the options every UDP socket of ours needs.
+     *
+     * Must be called after EVERY socket() call. connect() replaces the fd when
+     * the target is an IP literal, and that replacement used to skip this - so a
+     * socket connected to 127.0.0.1 had no SO_RCVTIMEO and recvfrom() blocked
+     * forever. It stayed hidden because the latency echo loop only polls a
+     * silent socket when it outlives the server's send loop, and because a
+     * hostname target (m-lab) keeps the original, correctly configured fd.
+     */
+    private fun applySocketOptions(target: Int) {
+        // REUSEADDR for quick rebinds during development
+        memScoped {
+            val one = alloc<IntVar>()
+            one.value = 1
+            setsockopt(target, SOL_SOCKET, SO_REUSEADDR, one.ptr, sizeOf<IntVar>().convert())
+        }
+        // Small receive timeout so blocking recvfrom wakes periodically; this is
+        // what lets the caller observe silence and shut down promptly.
+        memScoped {
+            val tv = alloc<timeval>()
+            tv.tv_sec = 0
+            tv.tv_usec = 250_000 // 250 ms
+            val rc = setsockopt(
+                target, SOL_SOCKET, SO_RCVTIMEO,
+                tv.ptr,
+                sizeOf<timeval>().convert()
+            )
+            if (rc != 0) {
+                // Not fatal for sending, but receives can no longer time out, so
+                // say so loudly rather than leaving a silent hang to be found later.
+                println("IosUdpSocket: SO_RCVTIMEO set FAILED on fd=$target errno=${errno}; receives will block")
+            }
+        }
+    }
+
     private fun openIfNeeded() {
         if (fd < 0 || closed) {
             closed = false
@@ -269,28 +320,7 @@ internal class IosUdpSocket : KmpUdpSocket {
                 }
             }
 
-            // REUSEADDR for quick rebinds during development
-            memScoped {
-                val one = alloc<IntVar>()
-                one.value = 1
-                setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, one.ptr, sizeOf<IntVar>().convert())
-            }
-            // Small receive timeout so blocking recvfrom wakes periodically; aids prompt shutdown.
-            memScoped {
-                val tv = alloc<timeval>()
-                tv.tv_sec = 0
-                tv.tv_usec = 250_000 // 250 ms
-                val rc = setsockopt(
-                    fd, SOL_SOCKET, SO_RCVTIMEO,
-                    tv.ptr,                                   // ← no reinterpret
-                    sizeOf<timeval>().convert()
-                )
-                if (rc != 0) {
-                    val e = errno
-                    // Non-fatal; timeout just improves shutdown responsiveness.
-                    println("IosUdpSocket: SO_RCVTIMEO set failed errno=$e")
-                }
-            }
+            applySocketOptions(fd)
             println("UDP openIfNeeded: created fd=$fd (ipv6=${(fcntl(fd, F_GETFL) >= 0)}) closed=$closed")
         }
     }
