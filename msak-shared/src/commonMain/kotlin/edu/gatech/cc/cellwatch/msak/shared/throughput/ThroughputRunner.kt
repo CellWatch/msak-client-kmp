@@ -51,6 +51,13 @@ data class ThroughputSummary(
     val serverBytes: Long,
     val warmupDurationMs: Long = 0,
     val warmupBytesTransferred: Long = 0,
+    /**
+     * The window the counted bytes were actually observed over, first to last
+     * counted update. Callers must record this rather than the requested
+     * duration: a test cut short still transfers fewer bytes, and pairing those
+     * bytes with the requested duration understates the rate.
+     */
+    val measuredDurationMs: Long = 0,
 ) {
     fun asText(): String {
         val d = when (direction) {
@@ -59,7 +66,7 @@ data class ThroughputSummary(
         }
         return "Throughput $d OK | bytes=$appBytesTotal app Mbits=${fmt2(mbits)} Mbps=${fmt2(mbps)} " +
                 "updates client=$clientUpdates server=$serverUpdates " +
-                "warmup=${warmupDurationMs}ms/${warmupBytesTransferred}B " +
+                "measured=${measuredDurationMs}ms warmup=${warmupDurationMs}ms/${warmupBytesTransferred}B " +
                 "[client=${clientUpdates}/${fmt2(clientBytes / 1_000_000.0)}M server=${serverUpdates}/${fmt2(serverBytes / 1_000_000.0)}M]"
     }
 }
@@ -112,6 +119,7 @@ internal fun aggregateThroughputUpdates(
             val d = (cum - lastServer[s]).coerceAtLeast(0)
             lastServer[s] = cum
             serverUpdates++
+            serverBytes += d
             d
         } else {
             val cum = when (direction) {
@@ -121,24 +129,33 @@ internal fun aggregateThroughputUpdates(
             val d = (cum - lastClient[s]).coerceAtLeast(0)
             lastClient[s] = cum
             clientUpdates++
+            clientBytes += d
             d
         }
+
+        totalAppBytesTransferred += delta
+
+        // Count one side only. Both sides report cumulative counters for the
+        // SAME transfer, so summing them reported roughly double the real
+        // throughput. The receiver is the authoritative side - bytes handed to
+        // a socket on upload are not necessarily delivered - which also matches
+        // how M-Lab treats ndt7/msak: download is measured by the client,
+        // upload by the server.
+        val counts = when (direction) {
+            ThroughputDirection.DOWNLOAD -> !u.fromServer
+            ThroughputDirection.UPLOAD -> u.fromServer
+        }
+        if (!counts) continue
 
         val t = u.time.toEpochMilliseconds()
         if (firstTsMs == null) {
             firstTsMs = t
-            // Bytes in the first accepted update are treated as warmup bytes because they
+            // Bytes in the first counted update are treated as warmup bytes because they
             // accumulated before the summary measurement window starts.
             warmupBytesTransferred += delta
         } else {
             appBytesTotal += delta
-            if (u.fromServer) {
-                serverBytes += delta
-            } else {
-                clientBytes += delta
-            }
         }
-        totalAppBytesTransferred += delta
         lastTsMs = t
     }
 
@@ -185,6 +202,7 @@ internal fun summarizeThroughputAggregation(
         serverBytes = aggregation.serverBytes,
         warmupDurationMs = aggregation.warmupDurationMs,
         warmupBytesTransferred = aggregation.warmupBytesTransferred,
+        measuredDurationMs = aggregation.elapsedMs.roundToLong(),
     )
 }
 

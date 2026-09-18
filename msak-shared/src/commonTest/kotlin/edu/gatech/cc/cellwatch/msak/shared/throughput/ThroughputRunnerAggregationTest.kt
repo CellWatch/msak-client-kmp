@@ -9,6 +9,9 @@ class ThroughputRunnerAggregationTest {
 
     @Test
     fun aggregateThroughputUpdates_tracksWarmupDurationAndBytes() {
+        // DOWNLOAD is measured at the receiving client. The server's own report
+        // of the same transfer stays visible for diagnostics but must not be
+        // added to the total.
         val updates = listOf(
             update(
                 fromServer = false,
@@ -24,6 +27,13 @@ class ThroughputRunnerAggregationTest {
                 appBytesSent = 800,
                 appBytesReceived = 0,
             ),
+            update(
+                fromServer = false,
+                stream = 0,
+                epochMs = 2_500,
+                appBytesSent = 0,
+                appBytesReceived = 1_400,
+            ),
         )
 
         val agg = aggregateThroughputUpdates(
@@ -33,15 +43,18 @@ class ThroughputRunnerAggregationTest {
             testStartTimeMs = 1_000,
         )
 
-        assertEquals(800, agg.appBytesTotal)
-        assertEquals(1_200, agg.totalAppBytesTransferred)
-        assertEquals(1, agg.clientUpdates)
+        // 400 warm-up + 1000 measured on the client side; the server's 800 is excluded.
+        assertEquals(1_000, agg.appBytesTotal)
+        assertEquals(2_200, agg.totalAppBytesTransferred)
+        assertEquals(2, agg.clientUpdates)
         assertEquals(1, agg.serverUpdates)
-        assertEquals(0, agg.clientBytes)
+        // Per-side totals are diagnostics and include warm-up.
+        assertEquals(1_400, agg.clientBytes)
         assertEquals(800, agg.serverBytes)
         assertEquals(500, agg.warmupDurationMs)
         assertEquals(400, agg.warmupBytesTransferred)
-        assertEquals(200.0, agg.elapsedMs)
+        // Window spans counted updates only: 2500 - 1500.
+        assertEquals(1_000.0, agg.elapsedMs)
     }
 
     @Test
@@ -117,31 +130,17 @@ class ThroughputRunnerAggregationTest {
 
     @Test
     fun aggregateThroughputUpdates_multiStreamWithDelayedFirstUpdate() {
+        // UPLOAD is measured at the receiving server: bytes handed to a socket
+        // are not necessarily delivered.
         val updates = listOf(
             // Stream 0, first update at 2000ms (1000ms warmup)
-            update(
-                fromServer = false,
-                stream = 0,
-                epochMs = 2_000,
-                appBytesSent = 500,
-                appBytesReceived = 0,
-            ),
+            update(fromServer = true, stream = 0, epochMs = 2_000, appBytesSent = 0, appBytesReceived = 500),
             // Stream 1, much later
-            update(
-                fromServer = true,
-                stream = 1,
-                epochMs = 3_500,
-                appBytesSent = 0,
-                appBytesReceived = 1_200,
-            ),
+            update(fromServer = true, stream = 1, epochMs = 3_500, appBytesSent = 0, appBytesReceived = 1_200),
             // Stream 0 second update
-            update(
-                fromServer = false,
-                stream = 0,
-                epochMs = 4_000,
-                appBytesSent = 1_500,
-                appBytesReceived = 0,
-            ),
+            update(fromServer = true, stream = 0, epochMs = 4_000, appBytesSent = 0, appBytesReceived = 1_500),
+            // The client's own optimistic count must not reach the total.
+            update(fromServer = false, stream = 0, epochMs = 4_100, appBytesSent = 9_999, appBytesReceived = 0),
         )
 
         val agg = aggregateThroughputUpdates(
@@ -151,20 +150,18 @@ class ThroughputRunnerAggregationTest {
             testStartTimeMs = 1_000,
         )
 
-        // warmup = first update at 2000ms - test start at 1000ms = 1000ms
+        // warmup = first counted update at 2000ms - test start at 1000ms
         assertEquals(1_000, agg.warmupDurationMs)
-        // warmup bytes = first update bytes (stream 0: 500 sent)
         assertEquals(500, agg.warmupBytesTransferred)
-        // measured bytes exclude the warmup delta from the first accepted update
+        // 1200 (stream 1) + 1000 (stream 0 delta); warm-up and the client excluded
         assertEquals(2_200, agg.appBytesTotal)
-        // total bytes still include warmup for handshake/diagnostics
-        assertEquals(2_700, agg.totalAppBytesTransferred)
-        // elapsed = 4000 - 2000 = 2000ms
+        assertEquals(12_699, agg.totalAppBytesTransferred)
+        // Window ends at the last COUNTED update, not the trailing client one.
         assertEquals(2_000.0, agg.elapsedMs)
-        assertEquals(2, agg.clientUpdates)
-        assertEquals(1, agg.serverUpdates)
-        assertEquals(1_000, agg.clientBytes)
-        assertEquals(1_200, agg.serverBytes)
+        assertEquals(1, agg.clientUpdates)
+        assertEquals(3, agg.serverUpdates)
+        assertEquals(9_999, agg.clientBytes)
+        assertEquals(2_700, agg.serverBytes)
     }
 
     @Test

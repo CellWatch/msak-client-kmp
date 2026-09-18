@@ -6,6 +6,7 @@ import edu.gatech.cc.cellwatch.msak.shared.latency.LatencyResult
 import edu.gatech.cc.cellwatch.msak.shared.latency.LatencyUpdate
 
 import kotlinx.coroutines.*
+import kotlinx.datetime.Clock
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.channels.awaitClose
@@ -71,10 +72,17 @@ data class LatencySummary(
     val received: Int,
     val meanMs: Double?,
     val stdevMs: Double?,
+    /**
+     * The observed UDP data-plane window: from the first packet sent to
+     * teardown. Callers must record this rather than the requested duration -
+     * termination is driven by observed server silence, so the real window
+     * varies, and a run that ends early must not claim the full duration.
+     */
+    val measuredDurationMs: Long = 0,
 ) {
     fun asText(): String =
         if (meanMs == null || stdevMs == null) "OK $received/$sent (no samples)"
-        else "OK $received/$sent mean=${fmt2(meanMs)}ms stdev=${fmt2(stdevMs)}ms"
+        else "OK $received/$sent mean=${fmt2(meanMs)}ms stdev=${fmt2(stdevMs)}ms measured=${measuredDurationMs}ms"
 }
 
 private fun fmt2(v: Double): String {
@@ -120,7 +128,10 @@ private fun fmt2(v: Double): String {
  * it drags the mean toward zero in proportion to the loss rate. On a tethered
  * phone run with 11 lost of 132 it reported 52.3ms instead of 57.0ms.
  */
-internal fun summarizeLatency(res: LatencyResult): LatencySummary {
+internal fun summarizeLatency(
+    res: LatencyResult,
+    measuredDurationMs: Long = 0,
+): LatencySummary {
     // Filter on `lost`, not on nullability: a lost packet reports rttUs = 0.
     val rtts = res.RoundTrips.filter { it.lost != true }.mapNotNull { it.rttUs }
     val mean = rtts.takeIf { it.isNotEmpty() }?.average()?.div(1000.0)
@@ -134,6 +145,7 @@ internal fun summarizeLatency(res: LatencyResult): LatencySummary {
         received = res.PacketsReceived ?: 0,
         meanMs = mean,
         stdevMs = stdev,
+        measuredDurationMs = measuredDurationMs,
     )
 }
 
@@ -196,7 +208,13 @@ suspend fun runLatency(config: LatencyConfig): LatencySummary {
         val res = activeTest.result
             ?: throw MsakException(MsakErrorCode.UNKNOWN, "no latency result")
 
-        return summarizeLatency(res)
+        // startTime is stamped just before the first UDP packet (after
+        // authorize); endTime at terminal cleanup. Their difference is the
+        // observed data-plane window.
+        val measuredMs = activeTest.startTime?.let { start ->
+            (activeTest.endTime ?: Clock.System.now()) - start
+        }?.inWholeMilliseconds?.coerceAtLeast(0) ?: 0
+        return summarizeLatency(res, measuredMs)
     } catch (ce: CancellationException) {
         // If caller cancels, ensure the underlying test stops promptly, then rethrow.
         test?.let { runCatching { it.stop() } }
