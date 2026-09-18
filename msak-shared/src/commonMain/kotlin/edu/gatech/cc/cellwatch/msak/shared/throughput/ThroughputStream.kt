@@ -139,11 +139,16 @@ class ThroughputStream(
         val finalUrl = try {
             val builder = URLBuilder(url)
             val params = builder.parameters
+            // Debug, not warn: the Locate API always hands back a URL carrying
+            // index=0 (and may carry streams), and fanning out across streams
+            // REQUIRES replacing it - stream #1 must not connect as index 0. So
+            // this is the normal path, and warning on it fired for every stream
+            // of every phase in every run.
             if (params["streams"] != null) {
-                Log.w(logTAG, "Overriding existing streams=${params["streams"]} with ${streamsHint ?: 1}")
+                Log.d(logTAG, "replacing streams=${params["streams"]} with ${streamsHint ?: 1}")
             }
             if (params["index"] != null) {
-                Log.w(logTAG, "Overriding existing index=${params["index"]} with $id")
+                Log.d(logTAG, "replacing index=${params["index"]} with $id")
             }
             params.set("streams", (streamsHint ?: 1).toString())
             params.set("index", id.toString())
