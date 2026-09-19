@@ -30,9 +30,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
-    kotlinOptions {
-        jvmTarget = "11"
-    }
     buildFeatures {
         viewBinding = true
     }
@@ -53,4 +50,12 @@ dependencies {
     implementation(libs.slf4j.nop)
 
     implementation(project(":msak-shared"))
+}
+
+// Kotlin 2.3 removed the `kotlinOptions { jvmTarget = "11" }` shorthand; this is
+// the compilerOptions DSL replacement.
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
+    }
 }
